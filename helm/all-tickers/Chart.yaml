@@ -2,7 +2,7 @@ apiVersion: v2
 name: all-tickers
 description: Bulk ticker generation and validation system with SQLite database
 type: application
-version: 1.0.0
+version: 1.1.0
 appVersion: "2.0.0"
 home: https://github.com/Micah-L18/All-Tickers
 maintainers:
