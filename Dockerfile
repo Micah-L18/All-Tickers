@@ -14,8 +14,7 @@ RUN npm ci --only=production
 
 COPY . .
 
-RUN chmod +x scripts/*.sh && \
-    chmod +x index.sh
+RUN chmod +x scripts/*.sh
 
 RUN mkdir -p output && \
     chmod 777 output
@@ -26,4 +25,4 @@ EXPOSE 3000
 
 VOLUME ["/app/output"]
 
-CMD ["./index.sh"]
+CMD ["npm", "run", "pipeline"]
