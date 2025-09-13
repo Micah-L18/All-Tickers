@@ -1,0 +1,135 @@
+# Default values for all-tickers
+replicaCount: 1
+
+image:
+  repository: all-tickers
+  pullPolicy: IfNotPresent
+  tag: "2.0.0"
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+
+podSecurityContext:
+  fsGroup: 2000
+
+securityContext:
+  capabilities:
+    drop:
+    - ALL
+  readOnlyRootFilesystem: false
+  runAsNonRoot: true
+  runAsUser: 1000
+
+service:
+  type: ClusterIP
+  port: 3000
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: all-tickers.local
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+resources:
+  limits:
+    cpu: 2000m
+    memory: 12Gi
+  requests:
+    cpu: 500m
+    memory: 2Gi
+
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 3
+  targetCPUUtilizationPercentage: 80
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}
+
+persistence:
+  enabled: true
+  storageClass: ""
+  accessMode: ReadWriteOnce
+  size: 10Gi
+  mountPath: /app/output
+
+env:
+  NODE_OPTIONS: "--max-old-space-size=10240"
+  NODE_ENV: "production"
+
+configMap:
+  enabled: true
+  data:
+    pipeline.enabled: "true"
+    generate.enabled: "true"
+    validate.enabled: "true"
+    export.format: "both"
+
+cronjob:
+  enabled: false
+  schedule: "0 2 * * *"
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 1
+
+rancher:
+  project: ""
+  questions:
+    - variable: replicaCount
+      default: 1
+      description: "Number of replicas"
+      type: int
+      min: 1
+      max: 5
+      group: "Container Images"
+    - variable: image.tag
+      default: "2.0.0"
+      description: "Docker image tag"
+      type: string
+      group: "Container Images"
+    - variable: resources.requests.memory
+      default: "2Gi"
+      description: "Memory request"
+      type: string
+      group: "Resources"
+    - variable: resources.limits.memory
+      default: "12Gi"
+      description: "Memory limit"
+      type: string
+      group: "Resources"
+    - variable: persistence.enabled
+      default: true
+      description: "Enable persistent storage"
+      type: boolean
+      group: "Storage"
+    - variable: persistence.size
+      default: "10Gi"
+      description: "Storage size"
+      type: string
+      group: "Storage"
+    - variable: cronjob.enabled
+      default: false
+      description: "Enable scheduled pipeline runs"
+      type: boolean
+      group: "Scheduling"
+    - variable: cronjob.schedule
+      default: "0 2 * * *"
+      description: "Cron schedule (daily at 2 AM)"
+      type: string
+      group: "Scheduling"

@@ -1,0 +1,24 @@
+apiVersion: v2
+name: all-tickers
+description: Bulk ticker generation and validation system with SQLite database
+type: application
+version: 1.0.0
+appVersion: "2.0.0"
+home: https://github.com/Micah-L18/All-Tickers
+maintainers:
+  - name: All-Tickers
+    email: support@example.com
+keywords:
+  - tickers
+  - stock
+  - validation
+  - bulk
+  - finance
+  - trading
+icon: https://raw.githubusercontent.com/Micah-L18/All-Tickers/main/icon.png
+sources:
+  - https://github.com/Micah-L18/All-Tickers
+annotations:
+  catalog.cattle.io/certified: rancher
+  catalog.cattle.io/namespace: cattle-system
+  catalog.cattle.io/release-name: all-tickers

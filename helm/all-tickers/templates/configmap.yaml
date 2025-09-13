@@ -1,0 +1,16 @@
+{{- if .Values.configMap.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "all-tickers.fullname" . }}-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "all-tickers.labels" . | nindent 4 }}
+    cattle.io/creator: norman
+  annotations:
+    {{- if .Values.rancher.project }}
+    field.cattle.io/projectId: {{ .Values.rancher.project }}
+    {{- end }}
+data:
+  {{- toYaml .Values.configMap.data | nindent 2 }}
+{{- end }}

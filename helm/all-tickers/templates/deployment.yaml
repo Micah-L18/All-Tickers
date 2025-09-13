@@ -1,0 +1,117 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "all-tickers.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "all-tickers.labels" . | nindent 4 }}
+    cattle.io/creator: norman
+  annotations:
+    deployment.kubernetes.io/revision: "1"
+    {{- if .Values.rancher.project }}
+    field.cattle.io/projectId: {{ .Values.rancher.project }}
+    {{- end }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "all-tickers.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "all-tickers.selectorLabels" . | nindent 8 }}
+        cattle.io/creator: norman
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "all-tickers.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: {{ .Chart.Name }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 3000
+              protocol: TCP
+          env:
+            - name: NODE_OPTIONS
+              value: {{ .Values.env.NODE_OPTIONS | quote }}
+            - name: NODE_ENV
+              value: {{ .Values.env.NODE_ENV | quote }}
+            {{- if .Values.configMap.enabled }}
+            - name: PIPELINE_ENABLED
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "all-tickers.fullname" . }}-config
+                  key: pipeline.enabled
+            - name: GENERATE_ENABLED
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "all-tickers.fullname" . }}-config
+                  key: generate.enabled
+            - name: VALIDATE_ENABLED
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "all-tickers.fullname" . }}-config
+                  key: validate.enabled
+            - name: EXPORT_FORMAT
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "all-tickers.fullname" . }}-config
+                  key: export.format
+            {{- end }}
+          {{- if .Values.persistence.enabled }}
+          volumeMounts:
+            - name: data
+              mountPath: {{ .Values.persistence.mountPath }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          livenessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - "ps aux | grep -v grep | grep node"
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 10
+          readinessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - "test -f /app/output/.ready || echo 'ready' > /app/output/.ready"
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 5
+      {{- if .Values.persistence.enabled }}
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ include "all-tickers.fullname" . }}-data
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
