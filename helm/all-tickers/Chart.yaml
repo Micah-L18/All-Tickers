@@ -20,5 +20,5 @@ sources:
   - https://github.com/Micah-L18/All-Tickers
 annotations:
   catalog.cattle.io/certified: rancher
-  catalog.cattle.io/namespace: cattle-system
+  catalog.cattle.io/namespace: invest
   catalog.cattle.io/release-name: all-tickers
