@@ -1,0 +1,149 @@
+categories:
+- Stock Analysis
+- Data Processing
+
+questions:
+- variable: replicaCount
+  default: 1
+  description: "Number of replicas to run"
+  type: int
+  min: 1
+  max: 5
+  label: Replica Count
+  group: "Container Settings"
+
+- variable: image.tag
+  default: "2.0.0"
+  description: "Docker image tag version"
+  type: string
+  label: Image Tag
+  group: "Container Settings"
+
+- variable: resources.requests.memory
+  default: "2Gi"
+  description: "Memory request for the container"
+  type: string
+  label: Memory Request
+  group: "Resources"
+
+- variable: resources.limits.memory
+  default: "12Gi"
+  description: "Maximum memory limit for the container"
+  type: string
+  label: Memory Limit
+  group: "Resources"
+
+- variable: resources.requests.cpu
+  default: "500m"
+  description: "CPU request for the container"
+  type: string
+  label: CPU Request
+  group: "Resources"
+
+- variable: resources.limits.cpu
+  default: "2000m"
+  description: "Maximum CPU limit for the container"
+  type: string
+  label: CPU Limit
+  group: "Resources"
+
+- variable: persistence.enabled
+  default: true
+  description: "Enable persistent storage for ticker data"
+  type: boolean
+  label: Enable Persistence
+  group: "Storage"
+
+- variable: persistence.size
+  default: "10Gi"
+  description: "Size of persistent storage"
+  type: string
+  label: Storage Size
+  group: "Storage"
+
+- variable: persistence.storageClass
+  default: ""
+  description: "Storage class for persistent volumes"
+  type: storageclass
+  label: Storage Class
+  group: "Storage"
+
+- variable: configMap.data.pipeline\.enabled
+  default: "true"
+  description: "Enable the complete ticker pipeline"
+  type: boolean
+  label: Enable Pipeline
+  group: "Pipeline Configuration"
+
+- variable: configMap.data.generate\.enabled
+  default: "true"
+  description: "Enable ticker generation step"
+  type: boolean
+  label: Enable Generation
+  group: "Pipeline Configuration"
+
+- variable: configMap.data.validate\.enabled
+  default: "true"
+  description: "Enable ticker validation step"
+  type: boolean
+  label: Enable Validation
+  group: "Pipeline Configuration"
+
+- variable: configMap.data.export\.format
+  default: "both"
+  description: "Export format for results"
+  type: enum
+  options:
+    - "json"
+    - "csv"
+    - "both"
+  label: Export Format
+  group: "Pipeline Configuration"
+
+- variable: cronjob.enabled
+  default: false
+  description: "Enable scheduled pipeline runs"
+  type: boolean
+  label: Enable Scheduled Runs
+  group: "Scheduling"
+
+- variable: cronjob.schedule
+  default: "0 2 * * *"
+  description: "Cron schedule for pipeline runs (daily at 2 AM by default)"
+  type: string
+  label: Cron Schedule
+  group: "Scheduling"
+  show_if: "cronjob.enabled=true"
+
+- variable: env.NODE_OPTIONS
+  default: "--max-old-space-size=10240"
+  description: "Node.js memory options (10GB heap)"
+  type: string
+  label: Node Memory Options
+  group: "Advanced"
+
+- variable: service.type
+  default: "ClusterIP"
+  description: "Kubernetes service type"
+  type: enum
+  options:
+    - "ClusterIP"
+    - "NodePort"
+    - "LoadBalancer"
+  label: Service Type
+  group: "Networking"
+
+- variable: ingress.enabled
+  default: false
+  description: "Enable ingress for external access"
+  type: boolean
+  label: Enable Ingress
+  group: "Networking"
+
+- variable: ingress.hosts[0].host
+  default: "all-tickers.local"
+  description: "Hostname for ingress"
+  type: hostname
+  label: Ingress Hostname
+  group: "Networking"
+  show_if: "ingress.enabled=true"

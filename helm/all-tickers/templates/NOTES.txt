@@ -32,8 +32,8 @@
 {{- end }}
 
 4. Configuration:
-   - Pipeline enabled: {{ .Values.configMap.data.pipeline.enabled }}
-   - Export format: {{ .Values.configMap.data.export.format }}
+   - Pipeline enabled: {{ index .Values.configMap.data "pipeline.enabled" }}
+   - Export format: {{ index .Values.configMap.data "export.format" }}
 {{- if .Values.cronjob.enabled }}
    - Scheduled runs: {{ .Values.cronjob.schedule }}
 {{- end }}
