@@ -47,22 +47,22 @@ spec:
                   valueFrom:
                     configMapKeyRef:
                       name: {{ include "all-tickers.fullname" . }}-config
-                      key: pipeline.enabled
+                      key: pipeline-enabled
                 - name: GENERATE_ENABLED
                   valueFrom:
                     configMapKeyRef:
                       name: {{ include "all-tickers.fullname" . }}-config
-                      key: generate.enabled
+                      key: generate-enabled
                 - name: VALIDATE_ENABLED
                   valueFrom:
                     configMapKeyRef:
                       name: {{ include "all-tickers.fullname" . }}-config
-                      key: validate.enabled
+                      key: validate-enabled
                 - name: EXPORT_FORMAT
                   valueFrom:
                     configMapKeyRef:
                       name: {{ include "all-tickers.fullname" . }}-config
-                      key: export.format
+                      key: export-format
                 {{- end }}
               {{- if .Values.persistence.enabled }}
               volumeMounts:

@@ -2,7 +2,7 @@ apiVersion: v2
 name: all-tickers
 description: Bulk ticker generation and validation system with SQLite database
 type: application
-version: 2.0.0
+version: 2.7.0
 appVersion: "2.0.0"
 home: https://github.com/Micah-L18/All-Tickers
 maintainers:
@@ -19,12 +19,6 @@ icon: https://raw.githubusercontent.com/Micah-L18/All-Tickers/main/icon.png
 sources:
   - https://github.com/Micah-L18/All-Tickers
 annotations:
-  catalog.cattle.io/certified: rancher
-  catalog.cattle.io/namespace: invest
-  catalog.cattle.io/release-name: all-tickers
   catalog.cattle.io/display-name: "All Tickers"
-  catalog.cattle.io/provides-gvr: "apps/v1/Deployment"
-  catalog.cattle.io/auto-install: "all-tickers-crd=match"
-  catalog.rancher.io/ui-component: "all-tickers"
-  catalog.cattle.io/scope: "cluster"
-  catalog.cattle.io/type: "cluster-tool"
+  catalog.cattle.io/requests-cpu: "500m"
+  catalog.cattle.io/requests-memory: "2Gi"
