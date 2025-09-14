@@ -50,6 +50,10 @@ spec:
               value: {{ .Values.env.NODE_OPTIONS | quote }}
             - name: NODE_ENV
               value: {{ .Values.env.NODE_ENV | quote }}
+            - name: DB_PATH
+              value: {{ .Values.persistence.mountPath | quote }}
+            - name: OUTPUT_PATH
+              value: {{ .Values.persistence.mountPath | quote }}
             {{- if .Values.configMap.enabled }}
             - name: PIPELINE_ENABLED
               valueFrom:

@@ -49,11 +49,11 @@ function hasValidationWarning(ticker) {
 
 class TickerDataDatabase {
     constructor() {
-        const dbPath = path.join(__dirname, '..', 'db', 'ticker_data.db');
+        const dbPath = path.join(process.env.DB_PATH || '/app/output', 'ticker_data.db');
         this.db = new Database(dbPath);
         
         // Also connect to the validation database to mark inactive tickers
-        const validationDbPath = path.join(__dirname, '..', 'db', 'tickers.db');
+        const validationDbPath = path.join(process.env.DB_PATH || '/app/output', 'tickers.db');
         this.validationDb = new Database(validationDbPath);
         
         this.initializeDatabase();

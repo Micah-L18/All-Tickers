@@ -3,7 +3,8 @@ const path = require('path');
 
 class TickerGenerator {
     constructor() {
-        this.dbPath = path.join(__dirname, 'tickers.db');
+        // Use mounted volume path for database storage
+        this.dbPath = path.join(process.env.DB_PATH || '/app/output', 'tickers.db');
         this.db = new sqlite3.Database(this.dbPath);
     }
 

@@ -4,9 +4,9 @@ const path = require('path');
 
 class DataExporter {
     constructor() {
-        this.dbPath = path.join(__dirname, '../db/ticker_data.db');
+        this.dbPath = path.join(process.env.DB_PATH || '/app/output', 'ticker_data.db');
         this.db = new Database(this.dbPath);
-        this.outputDir = path.join(__dirname, '..', '..', 'output');
+        this.outputDir = process.env.OUTPUT_PATH || '/app/output';
     }
 
     async getAllTickerData() {

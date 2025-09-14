@@ -4,7 +4,7 @@ const path = require('path');
 
 class FastTickerValidator {
     constructor() {
-        this.dbPath = path.join(__dirname, '..', 'db', 'tickers.db');
+        this.dbPath = path.join(process.env.DB_PATH || '/app/output', 'tickers.db');
         this.db = new sqlite3.Database(this.dbPath);
         this.batchSize = 500; // Increased batch size
         this.delayMs = 200; // Reduced delay

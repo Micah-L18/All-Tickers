@@ -7,7 +7,7 @@ const path = require('path');
 
 class ActiveTickerRevalidator {
     constructor() {
-        this.dbPath = path.join(__dirname, '..', 'db', 'tickers.db');
+        this.dbPath = path.join(process.env.DB_PATH || '/app/output', 'tickers.db');
         this.db = new sqlite3.Database(this.dbPath);
         this.concurrentRequests = 8; // Conservative concurrency for active ticker validation
         this.batchSize = 500;
