@@ -141,7 +141,9 @@ class InactiveTickerRevalidator {
     // Main revalidation process
     async revalidateInactiveTickers() {
         console.log('🔍 Starting revalidation of inactive tickers...\n');
-        
+
+        const startTime = Date.now();
+
         // Get all inactive tickers
         const inactiveTickers = await this.getInactiveTickers();
         console.log(`📊 Found ${inactiveTickers.length.toLocaleString()} inactive tickers to revalidate\n`);
