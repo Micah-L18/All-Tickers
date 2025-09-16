@@ -42,7 +42,7 @@ class FastTickerValidator {
         }));
     }
 
-    // Fast ticker validation with shorter timeout
+    // Fast ticker validation with deep validation to catch problematic tickers
     async validateTickerFast(ticker) {
         try {
             const url = `https://query1.finance.yahoo.com/v8/finance/chart/${ticker}`;
@@ -58,6 +58,18 @@ class FastTickerValidator {
                 const meta = result.meta;
                 
                 if (meta && meta.regularMarketPrice) {
+                    // Ticker appears active, but let's do deeper validation to catch problematic tickers
+                    const deepValidationResult = await this.performDeepValidation(ticker);
+                    
+                    if (deepValidationResult.shouldMarkInactive) {
+                        console.log(`🗑️  ${ticker}: Deep validation failed - ${deepValidationResult.reason}`);
+                        return { 
+                            active: false, 
+                            price: -1, 
+                            exchange: 'DELISTED'
+                        };
+                    }
+                    
                     return {
                         active: true,
                         price: meta.regularMarketPrice,
@@ -69,6 +81,20 @@ class FastTickerValidator {
             return { active: false, price: -1, exchange: 'INACTIVE' }; // Mark as checked but inactive
             
         } catch (error) {
+            // Check for specific delisting errors
+            const errorMessage = error.message || '';
+            if (this.isDelistingError(errorMessage)) {
+                return { 
+                    active: false, 
+                    price: -1, 
+                    exchange: 'DELISTED'
+                };
+            }
+            
+            // Network errors or 404s might indicate delisted tickers
+            if (error.response && error.response.status === 404) {
+                return { active: false, price: -1, exchange: 'NOT_FOUND' };
+            }
             return { active: false, price: -1, exchange: 'INACTIVE' }; // Mark as checked but inactive
         }
     }
@@ -197,6 +223,70 @@ class FastTickerValidator {
         const seconds = remainingSeconds % 60;
         
         return `${hours}h ${minutes}m ${seconds}s`;
+    }
+
+    // Check if an error message indicates a delisted/problematic ticker
+    isDelistingError(errorMessage) {
+        return errorMessage.includes('No fundamentals data found for symbol') ||
+               errorMessage.includes('1d data not available for startTime') ||
+               errorMessage.includes('Only 100 years worth of day granularity data are allowed') ||
+               errorMessage.includes('Ticker not found') ||
+               errorMessage.includes('Invalid ticker') ||
+               errorMessage.includes('Symbol not found') ||
+               errorMessage.includes('No data found for this date range');
+    }
+
+    // Perform deeper validation to catch problematic tickers
+    async performDeepValidation(ticker) {
+        try {
+            // Test if we can get historical data (this is where many problematic tickers fail)
+            const historicalUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${ticker}?range=1mo&interval=1d`;
+            const historicalResponse = await axios.get(historicalUrl, {
+                timeout: 3000, // Shorter timeout for fast validation
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
+                }
+            });
+
+            // Test if we can get quote data
+            const quoteUrl = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${ticker}`;
+            const quoteResponse = await axios.get(quoteUrl, {
+                timeout: 3000, // Shorter timeout for fast validation
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
+                }
+            });
+
+            // Check if the responses contain the problematic error patterns
+            const responses = [historicalResponse, quoteResponse];
+            for (const resp of responses) {
+                const responseText = JSON.stringify(resp.data);
+                if (responseText.includes('No fundamentals data found for symbol') ||
+                    responseText.includes('1d data not available for startTime')) {
+                    return {
+                        shouldMarkInactive: true,
+                        reason: 'Deep validation failed - problematic ticker detected'
+                    };
+                }
+            }
+
+            return { shouldMarkInactive: false };
+            
+        } catch (error) {
+            const errorMessage = error.message || '';
+            
+            // If we get specific delisting errors during deep validation, mark as inactive
+            if (this.isDelistingError(errorMessage)) {
+                return {
+                    shouldMarkInactive: true,
+                    reason: `Deep validation error: ${errorMessage}`
+                };
+            }
+            
+            // For other errors during deep validation, assume ticker is still active
+            // (we don't want to mark tickers inactive due to temporary network issues)
+            return { shouldMarkInactive: false };
+        }
     }
 
     // Close database connection
