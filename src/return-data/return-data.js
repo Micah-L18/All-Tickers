@@ -297,6 +297,17 @@ async function saveTickerDataToDB(symbol, database) {
         const hasSchemaIssues = (data.metadata.error && data.metadata.errorType === 'SCHEMA_VALIDATION') || 
                                data.metadata.hadValidationWarnings;
         
+        // Check for specific errors that should mark ticker as delisted/inactive
+        const shouldMarkDelisted = data.metadata.error && (
+            data.metadata.error.includes('No fundamentals data found for symbol') ||
+            data.metadata.error.includes('1d data not available for startTime') ||
+            data.metadata.error.includes('Only 100 years worth of day granularity data are allowed') ||
+            data.metadata.error.includes('Ticker not found') ||
+            data.metadata.error.includes('Invalid ticker') ||
+            data.metadata.error.includes('Symbol not found') ||
+            data.metadata.error.includes('No data found for this date range')
+        );
+        
         if (hasSchemaIssues) {
             // Mark as inactive in validation database
             try {
@@ -313,6 +324,25 @@ async function saveTickerDataToDB(symbol, database) {
                 success: false, 
                 error: data.metadata.error || 'Validation warnings detected - marked as inactive',
                 errorType: 'SCHEMA_VALIDATION'
+            };
+        }
+        
+        if (shouldMarkDelisted) {
+            // Mark as delisted/inactive in validation database
+            try {
+                await database.markTickerInactive(symbol, 'DELISTED');
+                console.log(`🗑️  Marked ${symbol} as delisted due to: ${data.metadata.error}`);
+            } catch (markError) {
+                console.log(`⚠️  Warning: Could not mark ${symbol} as delisted: ${markError.message}`);
+            }
+            
+            // Don't save delisted ticker data to the main database
+            return { 
+                symbol, 
+                success: false, 
+                error: data.metadata.error,
+                errorType: 'DELISTED',
+                markedAsDelisted: true
             };
         }
         
@@ -387,6 +417,7 @@ async function processAllActiveTickers() {
         const results = [];
         const errors = [];
         const schemaErrors = [];
+        const delistedTickers = [];
         let processed = 0;
         let requestCount = 0;
         let skipped = 0;
@@ -476,6 +507,9 @@ async function processAllActiveTickers() {
                                 if (result.errorType === 'SCHEMA_VALIDATION') {
                                     schemaErrors.push({ symbol, error: result.error || 'Schema validation error' });
                                     console.log(`   🔄 ${symbol}: Marked inactive (schema error)`);
+                                } else if (result.errorType === 'DELISTED') {
+                                    delistedTickers.push({ symbol, error: result.error || 'Delisted ticker' });
+                                    console.log(`   🗑️  ${symbol}: Marked as delisted`);
                                 } else {
                                     errors.push({ symbol, error: result.error || 'Unknown error' });
                                     // Different message for undefined vs other errors
@@ -541,10 +575,11 @@ async function processAllActiveTickers() {
         console.log(`⏭️  Skipped (recently updated): ${skipped} tickers`);
         console.log(`❌ Failed to process: ${errors.length} tickers`);
         console.log(`🔄 Schema errors (marked inactive): ${schemaErrors.length} tickers`);
+        console.log(`🗑️  Delisted tickers (marked inactive): ${delistedTickers.length} tickers`);
         console.log(`🌐 Total API requests made: ${requestCount}`);
         console.log(`💾 Total records in database: ${finalDbCount}`);
         
-        const totalProcessed = results.length + errors.length + schemaErrors.length;
+        const totalProcessed = results.length + errors.length + schemaErrors.length + delistedTickers.length;
         const successRate = totalProcessed > 0 ? ((results.length / totalProcessed) * 100).toFixed(1) : '0.0';
         const efficiencyRate = ((totalProcessed / activeTickers.length) * 100).toFixed(1);
         console.log(`� Success rate: ${successRate}% (of actually processed)`);
@@ -581,6 +616,16 @@ async function processAllActiveTickers() {
             }
         }
         
+        if (delistedTickers.length > 0) {
+            console.log('\n🗑️  Delisted tickers - marked as inactive (first 10):');
+            delistedTickers.slice(0, 10).forEach(error => {
+                console.log(`   ${error.symbol}: ${error.error}`);
+            });
+            if (delistedTickers.length > 10) {
+                console.log(`   ... and ${delistedTickers.length - 10} more`);
+            }
+        }
+        
         // Create a summary file
         const summaryData = {
             processedDate: new Date().toISOString(),
@@ -589,6 +634,7 @@ async function processAllActiveTickers() {
             skipped: skipped,
             failed: errors.length,
             schemaErrors: schemaErrors.length,
+            delistedTickers: delistedTickers.length,
             totalApiRequests: requestCount,
             sessionRefreshes: refreshCount,
             successRate: `${successRate}%`,
@@ -597,7 +643,8 @@ async function processAllActiveTickers() {
             databasePath: path.join(__dirname, '..', 'db', 'ticker_data.db'),
             recentUpdates: recentUpdates,
             errors: errors.slice(0, 100), // Limit errors in summary to first 100
-            schemaErrorTickers: schemaErrors.slice(0, 50) // Limit schema errors to first 50
+            schemaErrorTickers: schemaErrors.slice(0, 50), // Limit schema errors to first 50
+            delistedTickersList: delistedTickers.slice(0, 50) // Limit delisted tickers to first 50
         };
         
         const outputDir = path.join(__dirname, '..', '..', 'output');
