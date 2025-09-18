@@ -21,38 +21,73 @@ async function loadSystemStatus() {
         
         const statusDiv = document.getElementById('status-overview');
         
+        // Check for running processes
+        let runningProcessesHtml = '';
+        if (data.runningProcesses && data.runningProcesses.length > 0) {
+            runningProcessesHtml = `
+                <div class="alert alert-info">
+                    <i class="fas fa-cog fa-spin"></i> 
+                    <strong>Running Processes:</strong>
+                    <ul class="mb-0 mt-2 list-unstyled">
+                        ${data.runningProcesses.map(proc => `
+                            <li class="running-process-item" style="cursor: pointer; padding: 5px; border-radius: 5px;" 
+                                onclick="showProcessDetails('${proc.processId}', '${proc.command}', '${proc.formattedDuration}', '${new Date(proc.startTime).toLocaleString()}')">
+                                <i class="fas fa-hand-pointer me-2"></i>
+                                <strong>${proc.command}</strong> - Running for ${proc.formattedDuration}
+                                <small class="text-muted ms-2">(click for details)</small>
+                            </li>
+                        `).join('')}
+                    </ul>
+                </div>
+            `;
+        }
+        
         if (data.status === 'no_database') {
-            statusDiv.innerHTML = `
+            statusDiv.innerHTML = runningProcessesHtml + `
                 <div class="alert alert-warning">
                     <i class="fas fa-exclamation-triangle"></i> 
                     ${data.message}
                 </div>
             `;
         } else if (data.stats) {
-            statusDiv.innerHTML = `
+            statusDiv.innerHTML = runningProcessesHtml + `
                 <div class="row">
-                    <div class="col-md-3">
+                    <div class="col-md-2">
                         <div class="text-center">
                             <h3 class="text-primary">${(data.stats.total || 0).toLocaleString()}</h3>
                             <small>Total Tickers</small>
                         </div>
                     </div>
-                    <div class="col-md-3">
+                    <div class="col-md-2">
                         <div class="text-center">
                             <h3 class="text-success">${(data.stats.active || 0).toLocaleString()}</h3>
                             <small>Active Tickers</small>
                         </div>
                     </div>
-                    <div class="col-md-3">
+                    <div class="col-md-2">
                         <div class="text-center">
                             <h3 class="text-info">${(data.stats.validated || 0).toLocaleString()}</h3>
                             <small>Validated Tickers</small>
                         </div>
                     </div>
-                    <div class="col-md-3">
+                    <div class="col-md-2">
                         <div class="text-center">
                             <h3 class="text-secondary">${data.stats.exchanges || 0}</h3>
                             <small>Exchanges</small>
+                        </div>
+                    </div>
+                    <div class="col-md-2">
+                        <div class="text-center">
+                            <h3 class="text-warning">${(data.stats.need_validation || 0).toLocaleString()}</h3>
+                            <small>Need Validation</small>
+                            <br><small class="text-muted">(never or >5 days)</small>
+                        </div>
+                    </div>
+                    <div class="col-md-2">
+                        <div class="text-center">
+                            <h3 class="text-danger">${(data.stats.need_data_update || 0).toLocaleString()}</h3>
+                            <small>Need Data Update</small>
+                            <br><small class="text-muted">(active, >1 day old)</small>
                         </div>
                     </div>
                 </div>
@@ -71,7 +106,7 @@ async function loadSystemStatus() {
                 ` : ''}
             `;
         } else {
-            statusDiv.innerHTML = `
+            statusDiv.innerHTML = runningProcessesHtml + `
                 <div class="alert alert-warning">
                     <i class="fas fa-exclamation-triangle"></i> 
                     Database stats not available. Please generate tickers first.
@@ -86,6 +121,36 @@ async function loadSystemStatus() {
             </div>
         `;
     }
+    
+    // Update button states based on running processes
+    updateButtonStates(data?.runningProcesses || []);
+}
+
+function updateButtonStates(runningProcesses) {
+    const buttons = document.querySelectorAll('.command-btn[data-command]');
+    
+    buttons.forEach(button => {
+        const command = button.getAttribute('data-command');
+        const isRunning = runningProcesses.some(proc => proc.command === command);
+        
+        if (isRunning) {
+            button.classList.add('disabled');
+            button.disabled = true;
+            // Add spinning icon to show it's running
+            const icon = button.querySelector('i');
+            if (icon && !icon.classList.contains('fa-spin')) {
+                icon.classList.add('fa-spin');
+            }
+        } else {
+            button.classList.remove('disabled');
+            button.disabled = false;
+            // Remove spinning icon
+            const icon = button.querySelector('i');
+            if (icon) {
+                icon.classList.remove('fa-spin');
+            }
+        }
+    });
 }
 
 async function loadTickers(page = 1) {
@@ -185,6 +250,22 @@ function updatePagination(currentPage, totalPages, totalItems) {
 }
 
 async function runCommand(command) {
+    // Check if the specific command is already running
+    try {
+        const statusResponse = await fetch('/api/status');
+        const statusData = await statusResponse.json();
+        
+        if (statusData.runningProcesses && statusData.runningProcesses.length > 0) {
+            const runningCommand = statusData.runningProcesses.find(proc => proc.command === command);
+            if (runningCommand) {
+                alert(`The ${command} command is already running (started ${runningCommand.duration} ago). Please wait for it to complete.`);
+                return;
+            }
+        }
+    } catch (error) {
+        console.warn('Could not check running processes:', error);
+    }
+    
     if (isCommandRunning) {
         alert('A command is already running. Please wait for it to complete.');
         return;
@@ -298,6 +379,11 @@ async function runCommand(command) {
             btn.classList.remove('loading');
             btn.disabled = false;
         });
+        
+        // Refresh system status to update running processes and button states
+        setTimeout(() => {
+            loadSystemStatus();
+        }, 500);
     }
 }
 
@@ -440,4 +526,127 @@ function clearOutput() {
     document.getElementById('command-output').textContent = '';
     document.getElementById('interactive-input').style.display = 'none';
     currentProcessId = null;
+}
+
+// Function to show process details in modal
+let currentModalProcessId = null;
+let modalUpdateInterval = null;
+
+function showProcessDetails(processId, command, formattedDuration, startTime) {
+    // Store current process ID for updates
+    currentModalProcessId = processId;
+    
+    // Populate modal with process information
+    document.getElementById('modal-command').textContent = command;
+    document.getElementById('modal-duration').textContent = formattedDuration;
+    document.getElementById('modal-start-time').textContent = startTime;
+    document.getElementById('modal-process-id').textContent = processId;
+    
+    // Set up the kill button
+    const killBtn = document.getElementById('kill-process-btn');
+    killBtn.setAttribute('data-process-id', processId);
+    
+    // Show the modal
+    const modal = new bootstrap.Modal(document.getElementById('processDetailsModal'));
+    modal.show();
+    
+    // Start loading live terminal output
+    loadProcessOutput();
+    
+    // Set up auto-refresh for live terminal
+    modalUpdateInterval = setInterval(loadProcessOutput, 2000);
+    
+    // Clean up when modal is closed
+    document.getElementById('processDetailsModal').addEventListener('hidden.bs.modal', function () {
+        if (modalUpdateInterval) {
+            clearInterval(modalUpdateInterval);
+            modalUpdateInterval = null;
+        }
+        currentModalProcessId = null;
+    }, { once: true });
+}
+
+// Function to load and display process output
+async function loadProcessOutput() {
+    if (!currentModalProcessId) return;
+    
+    try {
+        const response = await fetch(`/api/process-output/${currentModalProcessId}`);
+        const terminalDiv = document.getElementById('modal-terminal-output');
+        
+        if (response.ok) {
+            const data = await response.json();
+            
+            // Combine output and error streams
+            let fullOutput = data.output;
+            if (data.error) {
+                fullOutput += '\n--- STDERR ---\n' + data.error;
+            }
+            
+            if (fullOutput.trim()) {
+                terminalDiv.innerHTML = `<pre>${escapeHtml(fullOutput)}</pre>`;
+                // Auto-scroll to bottom
+                terminalDiv.scrollTop = terminalDiv.scrollHeight;
+            } else {
+                terminalDiv.innerHTML = '<div class="text-muted">No output yet...</div>';
+            }
+        } else {
+            // Process no longer exists
+            terminalDiv.innerHTML = '<div class="text-warning">Process has completed or been terminated.</div>';
+            if (modalUpdateInterval) {
+                clearInterval(modalUpdateInterval);
+                modalUpdateInterval = null;
+            }
+        }
+    } catch (error) {
+        console.error('Failed to load process output:', error);
+        document.getElementById('modal-terminal-output').innerHTML = 
+            `<div class="text-danger">Error loading output: ${error.message}</div>`;
+    }
+}
+
+// Function to escape HTML for safe display
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+// Function to confirm and kill process
+async function confirmKillProcess() {
+    if (!currentModalProcessId) return;
+    
+    const confirmed = confirm(
+        `Are you sure you want to stop this process?\n\n` +
+        `This will terminate the running command and cannot be undone.`
+    );
+    
+    if (!confirmed) return;
+    
+    try {
+        const response = await fetch('/api/kill-process', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ processId: currentModalProcessId })
+        });
+        
+        const data = await response.json();
+        
+        if (response.ok) {
+            alert(`Process stopped successfully: ${data.message}`);
+            
+            // Close the modal
+            const modal = bootstrap.Modal.getInstance(document.getElementById('processDetailsModal'));
+            modal.hide();
+            
+            // Refresh system status
+            loadSystemStatus();
+        } else {
+            alert(`Failed to stop process: ${data.error}`);
+        }
+    } catch (error) {
+        alert(`Error stopping process: ${error.message}`);
+    }
 }
