@@ -250,18 +250,21 @@ app.post('/api/run-command', (req, res) => {
         }
     });
 
-    // Set a longer timeout for pipeline command
-    const timeoutDuration = command === 'pipeline' ? 30 * 60 * 1000 : 10 * 60 * 1000; // 30 min for pipeline, 10 min for others
-    const timeout = setTimeout(() => {
-        if (!isCompleted) {
-            res.write(`\n⚠️  Command timed out after ${command === 'pipeline' ? '30' : '10'} minutes\n`);
-            child.kill('SIGTERM');
-        }
-    }, timeoutDuration);
+    // Disable timeout for now - let commands complete naturally
+    // const longRunningCommands = ['pipeline', 'generate', 'validate', 'gather', 'revalidate-active', 'revalidate-inactive'];
+    // const timeoutDuration = longRunningCommands.includes(command) ? 45 * 60 * 1000 : 15 * 60 * 1000; // 45 min for long commands, 15 min for others
+    // const timeoutMinutes = longRunningCommands.includes(command) ? 45 : 15;
+    
+    // const timeout = setTimeout(() => {
+    //     if (!isCompleted) {
+    //         res.write(`\n⚠️  Command timed out after ${timeoutMinutes} minutes\n`);
+    //         child.kill('SIGTERM');
+    //     }
+    // }, timeoutDuration);
 
-    child.on('close', () => {
-        clearTimeout(timeout);
-    });
+    // child.on('close', () => {
+    //     clearTimeout(timeout);
+    // });
 });
 
 // Send input to running interactive command

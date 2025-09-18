@@ -28,30 +28,30 @@ async function loadSystemStatus() {
                     ${data.message}
                 </div>
             `;
-        } else {
+        } else if (data.stats) {
             statusDiv.innerHTML = `
                 <div class="row">
                     <div class="col-md-3">
                         <div class="text-center">
-                            <h3 class="text-primary">${data.stats.total.toLocaleString()}</h3>
+                            <h3 class="text-primary">${(data.stats.total || 0).toLocaleString()}</h3>
                             <small>Total Tickers</small>
                         </div>
                     </div>
                     <div class="col-md-3">
                         <div class="text-center">
-                            <h3 class="text-success">${data.stats.active.toLocaleString()}</h3>
+                            <h3 class="text-success">${(data.stats.active || 0).toLocaleString()}</h3>
                             <small>Active Tickers</small>
                         </div>
                     </div>
                     <div class="col-md-3">
                         <div class="text-center">
-                            <h3 class="text-info">${data.stats.validated.toLocaleString()}</h3>
+                            <h3 class="text-info">${(data.stats.validated || 0).toLocaleString()}</h3>
                             <small>Validated Tickers</small>
                         </div>
                     </div>
                     <div class="col-md-3">
                         <div class="text-center">
-                            <h3 class="text-secondary">${data.stats.exchanges}</h3>
+                            <h3 class="text-secondary">${data.stats.exchanges || 0}</h3>
                             <small>Exchanges</small>
                         </div>
                     </div>
@@ -69,6 +69,13 @@ async function loadSystemStatus() {
                     `).join('')}
                 </div>
                 ` : ''}
+            `;
+        } else {
+            statusDiv.innerHTML = `
+                <div class="alert alert-warning">
+                    <i class="fas fa-exclamation-triangle"></i> 
+                    Database stats not available. Please generate tickers first.
+                </div>
             `;
         }
     } catch (error) {
