@@ -10,6 +10,23 @@ const PORT = process.env.PORT || 3000;
 // Store running processes for interactive input
 const runningProcesses = new Map();
 
+// Helper function to format duration in human-readable format
+function formatDuration(milliseconds) {
+    const seconds = Math.floor(milliseconds / 1000);
+    const minutes = Math.floor(seconds / 60);
+    const hours = Math.floor(minutes / 60);
+    
+    if (hours > 0) {
+        const remainingMinutes = minutes % 60;
+        return `${hours}h ${remainingMinutes}m`;
+    } else if (minutes > 0) {
+        const remainingSeconds = seconds % 60;
+        return `${minutes}m ${remainingSeconds}s`;
+    } else {
+        return `${seconds}s`;
+    }
+}
+
 // Middleware
 app.use(express.static('public'));
 app.use(express.json());
@@ -31,16 +48,49 @@ app.get('/api/status', async (req, res) => {
         const db = new sqlite3.Database(dbPath);
         
         const stats = await new Promise((resolve, reject) => {
+            // First check if ticker_data table exists
             db.all(`
-                SELECT 
-                    COUNT(*) as total,
-                    SUM(CASE WHEN active = 1 THEN 1 ELSE 0 END) as active,
-                    SUM(CASE WHEN last_checked IS NOT NULL THEN 1 ELSE 0 END) as validated,
-                    COUNT(DISTINCT exchange) as exchanges
-                FROM tickers
-            `, (err, rows) => {
-                if (err) reject(err);
-                else resolve(rows[0]);
+                SELECT name FROM sqlite_master WHERE type='table' AND name='ticker_data'
+            `, (err, tables) => {
+                if (err) {
+                    reject(err);
+                    return;
+                }
+                
+                const hasTickerDataTable = tables.length > 0;
+                
+                let query = `
+                    SELECT 
+                        COUNT(*) as total,
+                        SUM(CASE WHEN active = 1 THEN 1 ELSE 0 END) as active,
+                        SUM(CASE WHEN last_checked IS NOT NULL THEN 1 ELSE 0 END) as validated,
+                        COUNT(DISTINCT exchange) as exchanges,
+                        -- Tickers needing validation (never validated or > 5 days old)
+                        SUM(CASE WHEN last_checked IS NULL OR 
+                            julianday('now') - julianday(last_checked) > 5 THEN 1 ELSE 0 END) as need_validation
+                `;
+                
+                if (hasTickerDataTable) {
+                    query += `,
+                        -- Active tickers needing data gathering update (> 1 day old or never updated)
+                        SUM(CASE WHEN active = 1 AND (
+                            ticker NOT IN (SELECT ticker FROM ticker_data) OR
+                            julianday('now') - julianday((SELECT last_updated FROM ticker_data WHERE ticker_data.ticker = tickers.ticker)) > 1
+                        ) THEN 1 ELSE 0 END) as need_data_update
+                    `;
+                } else {
+                    query += `,
+                        -- All active tickers need data update (table doesn't exist yet)
+                        SUM(CASE WHEN active = 1 THEN 1 ELSE 0 END) as need_data_update
+                    `;
+                }
+                
+                query += ` FROM tickers`;
+                
+                db.all(query, (err, rows) => {
+                    if (err) reject(err);
+                    else resolve(rows[0]);
+                });
             });
         });
 
@@ -59,10 +109,26 @@ app.get('/api/status', async (req, res) => {
 
         db.close();
 
+        // Get running process information
+        const runningProcessInfo = Array.from(runningProcesses.entries()).map(([processId, process]) => {
+            const currentTime = Date.now();
+            const startTime = process.startTime || currentTime;
+            const durationMs = currentTime - startTime;
+            
+            return {
+                processId,
+                command: process.command || 'unknown',
+                startTime: process.startTime || currentTime,
+                duration: durationMs,
+                formattedDuration: formatDuration(durationMs)
+            };
+        });
+
         res.json({
             status: 'ready',
             stats,
-            recentActivity
+            recentActivity,
+            runningProcesses: runningProcessInfo
         });
 
     } catch (error) {
@@ -148,9 +214,17 @@ app.post('/api/run-command', (req, res) => {
         shell: true
     });
 
-    // Store process for interactive input
+    // Store process for interactive input and status tracking
     const processId = `${command}_${Date.now()}`;
-    runningProcesses.set(processId, child);
+    const startTime = new Date();
+    const processInfo = {
+        process: child,
+        command: command,
+        startTime: startTime,
+        output: '', // Store accumulated output
+        error: ''   // Store accumulated errors
+    };
+    runningProcesses.set(processId, processInfo);
 
     let output = '';
     let error = '';
@@ -174,6 +248,12 @@ app.post('/api/run-command', (req, res) => {
     child.stdout.on('data', (data) => {
         const chunk = data.toString();
         output += chunk;
+        
+        // Store output in process info for later retrieval
+        if (runningProcesses.has(processId)) {
+            runningProcesses.get(processId).output += chunk;
+        }
+        
         if (!isCompleted) {
             res.write(chunk);
             
@@ -189,6 +269,12 @@ app.post('/api/run-command', (req, res) => {
     child.stderr.on('data', (data) => {
         const chunk = data.toString();
         error += chunk;
+        
+        // Store error output in process info for later retrieval
+        if (runningProcesses.has(processId)) {
+            runningProcesses.get(processId).error += chunk;
+        }
+        
         if (!isCompleted) {
             res.write(`STDERR: ${chunk}`);
         }
@@ -275,16 +361,71 @@ app.post('/api/send-input', (req, res) => {
         return res.status(400).json({ error: 'Process ID and input are required' });
     }
     
-    const process = runningProcesses.get(processId);
-    if (!process) {
+    const processInfo = runningProcesses.get(processId);
+    if (!processInfo) {
         return res.status(404).json({ error: 'Process not found or already completed' });
     }
     
     try {
-        process.stdin.write(input + '\n');
+        processInfo.process.stdin.write(input + '\n');
         res.json({ success: true, message: 'Input sent to process' });
     } catch (error) {
         res.status(500).json({ error: 'Failed to send input to process' });
+    }
+});
+
+// Get process output for live terminal display
+app.get('/api/process-output/:processId', (req, res) => {
+    const { processId } = req.params;
+    
+    const processInfo = runningProcesses.get(processId);
+    if (!processInfo) {
+        return res.status(404).json({ error: 'Process not found or already completed' });
+    }
+    
+    res.json({
+        processId,
+        command: processInfo.command,
+        output: processInfo.output,
+        error: processInfo.error,
+        startTime: processInfo.startTime,
+        isRunning: true
+    });
+});
+
+// Kill/terminate a running process
+app.post('/api/kill-process', (req, res) => {
+    const { processId } = req.body;
+    
+    if (!processId) {
+        return res.status(400).json({ error: 'Process ID is required' });
+    }
+    
+    const processInfo = runningProcesses.get(processId);
+    if (!processInfo) {
+        return res.status(404).json({ error: 'Process not found or already completed' });
+    }
+    
+    try {
+        // Kill the process
+        processInfo.process.kill('SIGTERM');
+        
+        // Wait a bit and force kill if still running
+        setTimeout(() => {
+            if (!processInfo.process.killed) {
+                processInfo.process.kill('SIGKILL');
+            }
+        }, 5000);
+        
+        // Clean up immediately
+        runningProcesses.delete(processId);
+        
+        res.json({ 
+            success: true, 
+            message: `Process ${processId} (${processInfo.command}) has been terminated` 
+        });
+    } catch (error) {
+        res.status(500).json({ error: `Failed to kill process: ${error.message}` });
     }
 });
 

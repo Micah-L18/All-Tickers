@@ -104,7 +104,7 @@ class FastTickerValidator {
         return new Promise((resolve, reject) => {
             const query = `
                 UPDATE tickers 
-                SET active = ?, price = ?, exchange = ?
+                SET active = ?, price = ?, exchange = ?, last_checked = CURRENT_TIMESTAMP
                 WHERE ticker = ?
             `;
             
