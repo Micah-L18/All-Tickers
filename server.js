@@ -48,52 +48,64 @@ app.get('/api/status', async (req, res) => {
         const db = new sqlite3.Database(dbPath);
         
         const stats = await new Promise((resolve, reject) => {
-            // First check if ticker_data table exists
+            // Check if ticker_data.db file exists (separate database for data gathering)
+            const tickerDataDbPath = path.join(__dirname, 'src', 'db', 'ticker_data.db');
+            const hasTickerDataDb = fs.existsSync(tickerDataDbPath);
+            
+            // Get basic stats from main tickers db
             db.all(`
-                SELECT name FROM sqlite_master WHERE type='table' AND name='ticker_data'
-            `, (err, tables) => {
+                SELECT 
+                    COUNT(*) as total,
+                    SUM(CASE WHEN active = 1 THEN 1 ELSE 0 END) as active,
+                    SUM(CASE WHEN last_checked IS NOT NULL THEN 1 ELSE 0 END) as validated,
+                    COUNT(DISTINCT exchange) as exchanges,
+                    -- Tickers needing validation (never validated or > 5 days old)
+                    SUM(CASE WHEN last_checked IS NULL OR 
+                        julianday('now') - julianday(last_checked) > 5 THEN 1 ELSE 0 END) as need_validation
+                FROM tickers
+            `, (err, mainRows) => {
                 if (err) {
                     reject(err);
                     return;
                 }
                 
-                const hasTickerDataTable = tables.length > 0;
-                
-                let query = `
-                    SELECT 
-                        COUNT(*) as total,
-                        SUM(CASE WHEN active = 1 THEN 1 ELSE 0 END) as active,
-                        SUM(CASE WHEN last_checked IS NOT NULL THEN 1 ELSE 0 END) as validated,
-                        COUNT(DISTINCT exchange) as exchanges,
-                        -- Tickers needing validation (never validated or > 5 days old)
-                        SUM(CASE WHEN last_checked IS NULL OR 
-                            julianday('now') - julianday(last_checked) > 5 THEN 1 ELSE 0 END) as need_validation
-                `;
-                
-                if (hasTickerDataTable) {
-                    query += `,
-                        -- Active tickers needing data gathering update (> 1 day old or never updated)
-                        SUM(CASE WHEN active = 1 AND (
-                            ticker NOT IN (SELECT ticker FROM ticker_data) OR
-                            julianday('now') - julianday((SELECT last_updated FROM ticker_data WHERE ticker_data.ticker = tickers.ticker)) > 1
-                        ) THEN 1 ELSE 0 END) as need_data_update
-                    `;
-                } else {
-                    query += `,
-                        -- All active tickers need data update (table doesn't exist yet)
-                        SUM(CASE WHEN active = 1 THEN 1 ELSE 0 END) as need_data_update
-                    `;
+                if (!hasTickerDataDb) {
+                    // No ticker_data.db file exists, so all active tickers need data updates
+                    resolve({
+                        ...mainRows[0],
+                        need_data_update: mainRows[0].active
+                    });
+                    return;
                 }
                 
-                query += ` FROM tickers`;
-                
-                db.all(query, (err, rows) => {
-                    if (err) reject(err);
-                    else resolve(rows[0]);
+                // Open the ticker data database to get count of recent data
+                const tickerDataDb = new sqlite3.Database(tickerDataDbPath);
+                tickerDataDb.all(`
+                    SELECT COUNT(*) as recent_data_count
+                    FROM ticker_data 
+                    WHERE julianday('now') - julianday(last_updated) <= 1
+                `, (err, dataRows) => {
+                    tickerDataDb.close();
+                    
+                    if (err) {
+                        // If error, assume all active need updates
+                        resolve({
+                            ...mainRows[0],
+                            need_data_update: mainRows[0].active
+                        });
+                    } else {
+                        // Active tickers minus those with recent data = those needing updates
+                        const recentDataCount = dataRows[0].recent_data_count || 0;
+                        const needDataUpdate = Math.max(0, mainRows[0].active - recentDataCount);
+                        resolve({
+                            ...mainRows[0],
+                            need_data_update: needDataUpdate
+                        });
+                    }
                 });
             });
         });
-
+        
         const recentActivity = await new Promise((resolve, reject) => {
             db.all(`
                 SELECT ticker, active, price, exchange, last_checked 
