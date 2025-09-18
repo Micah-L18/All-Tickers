@@ -1,11 +1,28 @@
 const sqlite3 = require('sqlite3').verbose();
 const path = require('path');
+const fs = require('fs');
 
 class TickerGenerator {
     constructor() {
-        // Use mounted volume path for database storage
-        this.dbPath = path.join(process.env.DB_PATH || '/app/output', 'tickers.db');
-        this.db = new sqlite3.Database(this.dbPath);
+        // Use local db directory path for database storage
+        const dbDir = path.join(__dirname, '..', 'db');
+        const dbPath = path.join(dbDir, 'tickers.db');
+        
+        // Ensure the db directory exists
+        if (!fs.existsSync(dbDir)) {
+            fs.mkdirSync(dbDir, { recursive: true });
+            console.log(`📁 Created database directory: ${dbDir}`);
+        }
+        
+        this.dbPath = dbPath;
+        this.db = new sqlite3.Database(this.dbPath, (err) => {
+            if (err) {
+                console.error('❌ Error opening database:', err);
+                throw err;
+            } else {
+                console.log(`✅ Database connected: ${this.dbPath}`);
+            }
+        });
     }
 
     // Initialize the database with the required table
@@ -52,41 +69,41 @@ class TickerGenerator {
             }
         }
 
-    //     // Generate 3-letter tickers (AAA-ZZZ)
-    //     for (let i = 0; i < alphabet.length; i++) {
-    //         for (let j = 0; j < alphabet.length; j++) {
-    //             for (let k = 0; k < alphabet.length; k++) {
-    //                 tickers.push(alphabet[i] + alphabet[j] + alphabet[k]);
-    //             }
-    //         }
-    //     }
+        // Generate 3-letter tickers (AAA-ZZZ)
+        for (let i = 0; i < alphabet.length; i++) {
+            for (let j = 0; j < alphabet.length; j++) {
+                for (let k = 0; k < alphabet.length; k++) {
+                    tickers.push(alphabet[i] + alphabet[j] + alphabet[k]);
+                }
+            }
+        }
 
-    //     //Generate 4-letter tickers (AAAA-ZZZZ)
-    //     for (let i = 0; i < alphabet.length; i++) {
-    //         for (let j = 0; j < alphabet.length; j++) {
-    //             for (let k = 0; k < alphabet.length; k++) {
-    //                 for (let l = 0; l < alphabet.length; l++) {
-    //                     tickers.push(alphabet[i] + alphabet[j] + alphabet[k] + alphabet[l]);
-    //                 }
-    //             }
-    //         }
-    //     }
+        //Generate 4-letter tickers (AAAA-ZZZZ)
+        for (let i = 0; i < alphabet.length; i++) {
+            for (let j = 0; j < alphabet.length; j++) {
+                for (let k = 0; k < alphabet.length; k++) {
+                    for (let l = 0; l < alphabet.length; l++) {
+                        tickers.push(alphabet[i] + alphabet[j] + alphabet[k] + alphabet[l]);
+                    }
+                }
+            }
+        }
 
-    //   //  (NOTE!) this command will run into the time limit of the Yahoo Finance API, still working on a solution!
-    //   //  the 5-letter ticker generation is commented out for now to prevent excessive API calls, it is anticipated that it will take 100+ hours to complete validation of all 1-5 letter tickers alone which is way beyond the scopt, so i may need to figure out a way to batch the tickers and have a checkpoint system to resume where it left off.
+      //  (NOTE!) this command will run into the time limit of the Yahoo Finance API, still working on a solution!
+      //  the 5-letter ticker generation is commented out for now to prevent excessive API calls, it is anticipated that it will take 100+ hours to complete validation of all 1-5 letter tickers alone which is way beyond the scopt, so i may need to figure out a way to batch the tickers and have a checkpoint system to resume where it left off.
        
-    //   //  Generate 5-letter tickers (AAAAA-ZZZZZ)
-    //     for (let i = 0; i < alphabet.length; i++) {
-    //         for (let j = 0; j < alphabet.length; j++) {
-    //             for (let k = 0; k < alphabet.length; k++) {
-    //                 for (let l = 0; l < alphabet.length; l++) {
-    //                     for (let m = 0; m < alphabet.length; m++) {
-    //                         tickers.push(alphabet[i] + alphabet[j] + alphabet[k] + alphabet[l] + alphabet[m]);
-    //                     }
-    //                 }
-    //             }
-    //         }
-    //     }
+      //  Generate 5-letter tickers (AAAAA-ZZZZZ)
+        for (let i = 0; i < alphabet.length; i++) {
+            for (let j = 0; j < alphabet.length; j++) {
+                for (let k = 0; k < alphabet.length; k++) {
+                    for (let l = 0; l < alphabet.length; l++) {
+                        for (let m = 0; m < alphabet.length; m++) {
+                            tickers.push(alphabet[i] + alphabet[j] + alphabet[k] + alphabet[l] + alphabet[m]);
+                        }
+                    }
+                }
+            }
+        }
 
         return tickers;
     }
