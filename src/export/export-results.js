@@ -4,10 +4,10 @@ const path = require('path');
 
 class TickerExporter {
     constructor() {
-        // Use mounted volume path for database storage
-        this.dbPath = path.join(process.env.DB_PATH || '/app/output', 'tickers.db');
+        // Use local db directory path for database storage
+        this.dbPath = path.join(__dirname, '..', 'db', 'tickers.db');
         this.db = new sqlite3.Database(this.dbPath);
-        this.outputDir = process.env.OUTPUT_PATH || '/app/output';
+        this.outputDir = path.join(__dirname, '..', '..', 'output');
         this.resultsPath = path.join(this.outputDir, 'results.json');
         this.activeTickersPath = path.join(this.outputDir, 'active_tickers.json');
         this.delistedTickersPath = path.join(this.outputDir, 'delisted_tickers.json');

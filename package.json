@@ -17,11 +17,17 @@
     "test": "./scripts/test-validate.sh"
   },
   "dependencies": {
-    "sqlite3": "^5.1.6",
     "axios": "^1.6.0",
+    "express": "^5.1.0",
+    "sqlite3": "^5.1.6",
     "yahoo-finance2": "^2.11.3"
   },
-  "keywords": ["tickers", "stock", "validation", "bulk"],
+  "keywords": [
+    "tickers",
+    "stock",
+    "validation",
+    "bulk"
+  ],
   "author": "All-Tickers",
   "license": "MIT"
 }

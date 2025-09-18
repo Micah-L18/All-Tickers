@@ -6,11 +6,11 @@ class NYSEResultsExporter {
     constructor() {
         // NYSE exchanges we want to include
         this.nyseExchanges = ['NYQ', 'NMS', 'NYSE Arca', 'BATS'];
-        this.dbPath = path.join(process.env.DB_PATH || '/app/output', 'tickers.db');
+        this.dbPath = path.join(__dirname, '..', 'db', 'tickers.db');
         this.db = new sqlite3.Database(this.dbPath);
 
         // Output paths
-        this.outputDir = process.env.OUTPUT_PATH || '/app/output';
+        this.outputDir = path.join(__dirname, '..', '..', 'output');
         this.nyseTickersPath = path.join(this.outputDir, 'nyse_tickers.json');
         this.nyseTickersCSVPath = path.join(this.outputDir, 'nyse_tickers.csv');
         

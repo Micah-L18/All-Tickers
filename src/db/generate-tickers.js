@@ -1,11 +1,28 @@
 const sqlite3 = require('sqlite3').verbose();
 const path = require('path');
+const fs = require('fs');
 
 class TickerGenerator {
     constructor() {
-        // Use mounted volume path for database storage
-        this.dbPath = path.join(process.env.DB_PATH || '/app/output', 'tickers.db');
-        this.db = new sqlite3.Database(this.dbPath);
+        // Use local db directory path for database storage
+        const dbDir = path.join(__dirname, '..', 'db');
+        const dbPath = path.join(dbDir, 'tickers.db');
+        
+        // Ensure the db directory exists
+        if (!fs.existsSync(dbDir)) {
+            fs.mkdirSync(dbDir, { recursive: true });
+            console.log(`📁 Created database directory: ${dbDir}`);
+        }
+        
+        this.dbPath = dbPath;
+        this.db = new sqlite3.Database(this.dbPath, (err) => {
+            if (err) {
+                console.error('❌ Error opening database:', err);
+                throw err;
+            } else {
+                console.log(`✅ Database connected: ${this.dbPath}`);
+            }
+        });
     }
 
     // Initialize the database with the required table
