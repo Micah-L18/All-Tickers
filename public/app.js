@@ -160,7 +160,7 @@ async function loadTickers(page = 1) {
     try {
         tableBody.innerHTML = `
             <tr>
-                <td colspan="5" class="text-center">
+                <td colspan="6" class="text-center">
                     <div class="spinner-border spinner-border-sm" role="status">
                         <span class="visually-hidden">Loading...</span>
                     </div>
@@ -175,7 +175,7 @@ async function loadTickers(page = 1) {
         if (data.tickers.length === 0) {
             tableBody.innerHTML = `
                 <tr>
-                    <td colspan="5" class="text-center text-muted">
+                    <td colspan="6" class="text-center text-muted">
                         No tickers found
                     </td>
                 </tr>
@@ -192,6 +192,13 @@ async function loadTickers(page = 1) {
                     <td>${ticker.price ? `$${ticker.price}` : 'N/A'}</td>
                     <td>${ticker.exchange || 'N/A'}</td>
                     <td>${ticker.last_checked ? new Date(ticker.last_checked).toLocaleString() : 'Never'}</td>
+                    <td>
+                        <button class="btn btn-sm btn-outline-primary" 
+                                onclick="validateRowTicker('${ticker.ticker}', this)"
+                                title="Validate ${ticker.ticker}">
+                            <i class="fas fa-check"></i>
+                        </button>
+                    </td>
                 </tr>
             `).join('');
         }
@@ -649,4 +656,89 @@ async function confirmKillProcess() {
     } catch (error) {
         alert(`Error stopping process: ${error.message}`);
     }
+}
+
+// Function to validate a single ticker from a table row
+async function validateRowTicker(symbol, buttonElement) {
+    const row = buttonElement.closest('tr');
+    const originalHtml = buttonElement.innerHTML;
+    
+    // Update button to show loading
+    buttonElement.disabled = true;
+    buttonElement.innerHTML = '<i class="fas fa-spinner fa-spin"></i>';
+    
+    try {
+        const response = await fetch('/api/validate-ticker', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ symbol })
+        });
+        
+        const data = await response.json();
+        
+        if (response.ok) {
+            const result = data.result;
+            const isValid = result.validation.active;
+            
+            // Update the row with new data
+            if (isValid) {
+                // Update status badge
+                const statusCell = row.cells[1];
+                statusCell.innerHTML = '<span class="badge bg-success">Active</span>';
+                
+                // Update price
+                const priceCell = row.cells[2];
+                priceCell.textContent = `$${result.validation.price}`;
+                
+                // Update exchange
+                const exchangeCell = row.cells[3];
+                exchangeCell.textContent = result.validation.exchange;
+                
+                // Update last checked
+                const lastCheckedCell = row.cells[4];
+                lastCheckedCell.textContent = new Date().toLocaleString();
+                
+                // Show success feedback
+                showRowFeedback(buttonElement, 'success', 'fas fa-check-circle');
+            } else {
+                // Update status badge
+                const statusCell = row.cells[1];
+                statusCell.innerHTML = '<span class="badge bg-secondary">Inactive</span>';
+                
+                // Show warning feedback
+                showRowFeedback(buttonElement, 'warning', 'fas fa-exclamation-triangle');
+            }
+            
+            // Refresh system status to update counts
+            loadSystemStatus();
+        } else {
+            showRowFeedback(buttonElement, 'danger', 'fas fa-times-circle');
+        }
+    } catch (error) {
+        showRowFeedback(buttonElement, 'danger', 'fas fa-times-circle');
+    } finally {
+        // Reset button after a delay
+        setTimeout(() => {
+            buttonElement.disabled = false;
+            buttonElement.innerHTML = originalHtml;
+        }, 2000);
+    }
+}
+
+// Helper function to show temporary feedback on validation button
+function showRowFeedback(buttonElement, type, iconClass) {
+    const colorMap = {
+        'success': 'btn-outline-success',
+        'warning': 'btn-outline-warning', 
+        'danger': 'btn-outline-danger'
+    };
+    
+    // Remove existing color classes
+    buttonElement.className = buttonElement.className.replace(/btn-outline-\w+/g, '');
+    
+    // Add feedback color and icon
+    buttonElement.classList.add(colorMap[type]);
+    buttonElement.innerHTML = `<i class="${iconClass}"></i>`;
 }

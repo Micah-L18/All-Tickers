@@ -138,6 +138,45 @@ class FastTickerValidator {
         });
     }
 
+    // Validate and update a single ticker
+    async validateSingleTicker(ticker) {
+        try {
+            console.log(`🔍 Validating single ticker: ${ticker}`);
+            
+            // Validate the ticker
+            const validationResult = await this.validateTickerFast(ticker);
+            
+            // Update database
+            const updateResult = await this.bulkUpdateTickers([{
+                ticker: ticker,
+                data: validationResult
+            }]);
+            
+            const result = {
+                ticker: ticker,
+                success: updateResult.errors === 0,
+                validation: validationResult,
+                status: validationResult.active ? 'active' : 'inactive',
+                message: validationResult.active 
+                    ? `Active: $${validationResult.price} on ${validationResult.exchange}`
+                    : `Inactive: ${validationResult.exchange}`
+            };
+            
+            console.log(`${validationResult.active ? '✅' : '❌'} ${ticker}: ${result.message}`);
+            return result;
+            
+        } catch (error) {
+            console.error(`❌ Error validating ${ticker}:`, error.message);
+            return {
+                ticker: ticker,
+                success: false,
+                validation: { active: false, price: null, exchange: 'ERROR' },
+                status: 'error',
+                message: `Error: ${error.message}`
+            };
+        }
+    }
+
     // Process a batch with concurrent validation
     async processBatchFast(tickers) {
         const results = {

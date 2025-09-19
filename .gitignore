@@ -2,3 +2,4 @@ node_modules/
 output/
 src/db/*.db
 .claude/settings.local.json
+testing
