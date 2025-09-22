@@ -140,7 +140,7 @@ app.get('/api/status', async (req, res) => {
 
 app.get('/api/tickers', async (req, res) => {
     try {
-        const { page = 1, limit = 50, filter = 'all' } = req.query;
+        const { page = 1, limit = 50, filter = 'all', search = '' } = req.query;
         const offset = (page - 1) * limit;
 
         if (!fs.existsSync(dbPath)) {
@@ -150,9 +150,27 @@ app.get('/api/tickers', async (req, res) => {
         const db = new sqlite3.Database(dbPath);
 
         let whereClause = '';
-        if (filter === 'active') whereClause = 'WHERE active = 1';
-        else if (filter === 'inactive') whereClause = 'WHERE active = 0';
-        else if (filter === 'validated') whereClause = 'WHERE last_checked IS NOT NULL';
+        let queryParams = [];
+        
+        // Build WHERE clause for filtering
+        const conditions = [];
+        
+        if (filter === 'active') conditions.push('active = 1');
+        else if (filter === 'inactive') conditions.push('active = 0');
+        else if (filter === 'validated') conditions.push('last_checked IS NOT NULL');
+        
+        // Add search functionality
+        if (search && search.trim()) {
+            conditions.push('ticker LIKE ?');
+            queryParams.push(`%${search.trim().toUpperCase()}%`);
+        }
+        
+        if (conditions.length > 0) {
+            whereClause = 'WHERE ' + conditions.join(' AND ');
+        }
+
+        // Add limit and offset to query params
+        queryParams.push(limit, offset);
 
         const tickers = await new Promise((resolve, reject) => {
             db.all(`
@@ -161,14 +179,15 @@ app.get('/api/tickers', async (req, res) => {
                 ${whereClause}
                 ORDER BY ticker 
                 LIMIT ? OFFSET ?
-            `, [limit, offset], (err, rows) => {
+            `, queryParams, (err, rows) => {
                 if (err) reject(err);
                 else resolve(rows);
             });
         });
 
         const total = await new Promise((resolve, reject) => {
-            db.get(`SELECT COUNT(*) as count FROM tickers ${whereClause}`, (err, row) => {
+            const countParams = queryParams.slice(0, -2); // Remove limit and offset
+            db.get(`SELECT COUNT(*) as count FROM tickers ${whereClause}`, countParams, (err, row) => {
                 if (err) reject(err);
                 else resolve(row.count);
             });
@@ -176,7 +195,82 @@ app.get('/api/tickers', async (req, res) => {
 
         db.close();
 
-        res.json({ tickers, total, page: parseInt(page), limit: parseInt(limit) });
+        res.json({ 
+            tickers, 
+            total, 
+            page: parseInt(page), 
+            limit: parseInt(limit),
+            search: search || '',
+            filter
+        });
+
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// API endpoint to get all tickers with errors/failures
+app.get('/api/tickers/errors', async (req, res) => {
+    try {
+        const { page = 1, limit = 50, search = '' } = req.query;
+        const offset = (page - 1) * limit;
+
+        if (!fs.existsSync(dbPath)) {
+            return res.json({ errors: [], total: 0 });
+        }
+
+        const db = new sqlite3.Database(dbPath);
+
+        let whereClause = 'WHERE (active = 0 OR price = -1 OR exchange = "NOT_FOUND" OR exchange IS NULL)';
+        let queryParams = [];
+        
+        // Add search functionality for errors
+        if (search && search.trim()) {
+            whereClause += ' AND ticker LIKE ?';
+            queryParams.push(`%${search.trim().toUpperCase()}%`);
+        }
+        
+        // Add limit and offset to query params
+        queryParams.push(limit, offset);
+
+        const errors = await new Promise((resolve, reject) => {
+            db.all(`
+                SELECT ticker, active, price, exchange, last_checked,
+                       CASE 
+                           WHEN active = 0 AND exchange = "NOT_FOUND" THEN "Ticker not found"
+                           WHEN active = 0 AND price = -1 THEN "Price unavailable"
+                           WHEN exchange = "NOT_FOUND" THEN "Exchange not found"
+                           WHEN exchange IS NULL THEN "No exchange data"
+                           WHEN price = -1 THEN "Price fetch failed"
+                           ELSE "Unknown error"
+                       END as error_type
+                FROM tickers 
+                ${whereClause}
+                ORDER BY last_checked DESC, ticker 
+                LIMIT ? OFFSET ?
+            `, queryParams, (err, rows) => {
+                if (err) reject(err);
+                else resolve(rows);
+            });
+        });
+
+        const total = await new Promise((resolve, reject) => {
+            const countParams = queryParams.slice(0, -2); // Remove limit and offset
+            db.get(`SELECT COUNT(*) as count FROM tickers ${whereClause}`, countParams, (err, row) => {
+                if (err) reject(err);
+                else resolve(row.count);
+            });
+        });
+
+        db.close();
+
+        res.json({ 
+            errors, 
+            total, 
+            page: parseInt(page), 
+            limit: parseInt(limit),
+            search: search || ''
+        });
 
     } catch (error) {
         res.status(500).json({ error: error.message });
@@ -339,7 +433,7 @@ app.get('/api/ticker-data', async (req, res) => {
                 message: 'ticker_data.db not found. Run data gathering first.' 
             });
         }
-        
+
         const db = new sqlite3.Database(tickerDataDbPath);
 
         // If specific ticker requested

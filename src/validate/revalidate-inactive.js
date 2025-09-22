@@ -8,14 +8,43 @@ const path = require('path');
 class InactiveTickerRevalidator {
     constructor() {
         this.dbPath = path.join(__dirname, '..', 'db', 'tickers.db');
-        this.db = new sqlite3.Database(this.dbPath);
+        this.db = null; // Initialize as null, create connection when needed
         this.concurrentRequests = 10; // Lower concurrency for re-validation
         this.batchSize = 500;
         this.retryDelay = 500; // 500ms between batches
+        this.maxRetries = 3; // Maximum database retry attempts
+        this.busyTimeout = 30000; // 30 second busy timeout
+    }
+
+    // Create database connection with proper settings
+    createConnection() {
+        return new Promise((resolve, reject) => {
+            const db = new sqlite3.Database(this.dbPath, (err) => {
+                if (err) {
+                    reject(err);
+                } else {
+                    // Configure database for better concurrency
+                    db.configure('busyTimeout', this.busyTimeout);
+                    db.run('PRAGMA journal_mode = WAL;'); // Write-Ahead Logging for better concurrency
+                    db.run('PRAGMA synchronous = NORMAL;'); // Balance between safety and performance
+                    db.run('PRAGMA temp_store = MEMORY;'); // Use memory for temporary storage
+                    db.run('PRAGMA mmap_size = 268435456;'); // 256MB memory mapping
+                    resolve(db);
+                }
+            });
+        });
+    }
+
+    // Ensure database connection exists
+    async ensureConnection() {
+        if (!this.db) {
+            this.db = await this.createConnection();
+        }
     }
 
     // Get all inactive tickers from database
     async getInactiveTickers() {
+        await this.ensureConnection();
         return new Promise((resolve, reject) => {
             const query = `
                 SELECT ticker 
@@ -176,8 +205,37 @@ class InactiveTickerRevalidator {
         });
     }
 
-    // Update database with revalidation results
+    // Update database with revalidation results using retry logic
     async updateDatabase(tickerResults) {
+        await this.ensureConnection();
+        
+        for (let attempt = 1; attempt <= this.maxRetries; attempt++) {
+            try {
+                return await this.updateDatabaseAttempt(tickerResults);
+            } catch (error) {
+                console.error(`❌ Database update attempt ${attempt} failed:`, error.message);
+                
+                if (attempt === this.maxRetries) {
+                    throw error;
+                }
+                
+                // Wait before retrying, with exponential backoff
+                const waitTime = 1000 * attempt;
+                console.log(`⏳ Waiting ${waitTime}ms before retry...`);
+                await new Promise(resolve => setTimeout(resolve, waitTime));
+                
+                // Recreate connection on retry
+                if (this.db) {
+                    this.db.close();
+                    this.db = null;
+                }
+                await this.ensureConnection();
+            }
+        }
+    }
+
+    // Single attempt at database update
+    async updateDatabaseAttempt(tickerResults) {
         return new Promise((resolve, reject) => {
             const query = `
                 UPDATE tickers 
@@ -185,15 +243,21 @@ class InactiveTickerRevalidator {
                 WHERE ticker = ?
             `;
             
-            const stmt = this.db.prepare(query);
-            this.db.run('BEGIN TRANSACTION');
-            
             let completed = 0;
             let errors = 0;
             let foundActive = 0;
             
-            tickerResults.forEach(({ ticker, active, price, exchange }) => {
-                stmt.run([
+            // Process updates individually instead of using transactions
+            // This reduces the chance of locks and makes the process more resilient
+            const processUpdate = (index) => {
+                if (index >= tickerResults.length) {
+                    resolve({ completed, errors, foundActive });
+                    return;
+                }
+                
+                const { ticker, active, price, exchange } = tickerResults[index];
+                
+                this.db.run(query, [
                     active ? 1 : 0,
                     price,
                     exchange,
@@ -209,20 +273,13 @@ class InactiveTickerRevalidator {
                     
                     completed++;
                     
-                    if (completed === tickerResults.length) {
-                        this.db.run('COMMIT', (commitErr) => {
-                            if (commitErr) {
-                                console.error('❌ Error committing transaction:', commitErr);
-                                reject(commitErr);
-                            } else {
-                                console.log(`✅ Database transaction committed: ${foundActive} newly active tickers`);
-                                stmt.finalize();
-                                resolve({ completed, errors, foundActive });
-                            }
-                        });
-                    }
+                    // Process next update after a small delay
+                    setTimeout(() => processUpdate(index + 1), 10);
                 });
-            });
+            };
+            
+            // Start processing
+            processUpdate(0);
         });
     }
 
@@ -323,9 +380,13 @@ class InactiveTickerRevalidator {
                 console.log(`📈 Progress: ${progress}% (${totalFoundActive} newly active tickers found so far)\n`);
                 
             } catch (error) {
-                console.error('❌ Batch update failed:', error);
+                console.error('❌ Batch update failed after all retries:', error);
                 console.error('❌ Error details:', error.message);
+                console.log('⚠️  Continuing with next batch...');
                 totalErrors += batch.length;
+                
+                // Add extra delay after failed batch
+                await new Promise(resolve => setTimeout(resolve, 5000));
             }
             
             // Longer delay between batches to be respectful to the API
@@ -358,7 +419,15 @@ class InactiveTickerRevalidator {
 
     // Close database connection
     close() {
-        this.db.close();
+        if (this.db) {
+            this.db.close((err) => {
+                if (err) {
+                    console.error('❌ Error closing database:', err);
+                } else {
+                    console.log('✅ Database connection closed');
+                }
+            });
+        }
     }
 }
 
@@ -366,22 +435,26 @@ class InactiveTickerRevalidator {
 async function main() {
     const revalidator = new InactiveTickerRevalidator();
     
+    // Graceful shutdown handler
+    const shutdown = (signal) => {
+        console.log(`\n� Received ${signal}. Gracefully shutting down...`);
+        console.log('💾 Progress has been saved to database');
+        revalidator.close();
+        process.exit(0);
+    };
+    
+    process.on('SIGINT', () => shutdown('SIGINT'));
+    process.on('SIGTERM', () => shutdown('SIGTERM'));
+    
     try {
         await revalidator.revalidateInactiveTickers();
     } catch (error) {
-        console.error('💥 Revalidation failed:', error);
+        console.error('� Revalidation failed:', error);
         process.exit(1);
     } finally {
         revalidator.close();
     }
 }
-
-// Handle interruption gracefully
-process.on('SIGINT', () => {
-    console.log('\n🛑 Revalidation interrupted by user');
-    console.log('💾 Progress has been saved to database');
-    process.exit(0);
-});
 
 // Run if this file is executed directly
 if (require.main === module) {

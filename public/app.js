@@ -1,6 +1,49 @@
 let currentPage = 1;
 let isCommandRunning = false;
 let currentProcessId = null;
+let searchTimeout = null;
+
+// Helper function to format timestamps as "time ago"
+function formatTimeAgo(timestamp) {
+    const now = new Date();
+    const past = new Date(timestamp);
+    const diffMs = now - past;
+    
+    const seconds = Math.floor(diffMs / 1000);
+    const minutes = Math.floor(seconds / 60);
+    const hours = Math.floor(minutes / 60);
+    const days = Math.floor(hours / 24);
+    
+    if (days > 0) {
+        return `${days} day${days > 1 ? 's' : ''} ago`;
+    } else if (hours > 0) {
+        return `${hours} hour${hours > 1 ? 's' : ''} ago`;
+    } else if (minutes > 0) {
+        return `${minutes} minute${minutes > 1 ? 's' : ''} ago`;
+    } else if (seconds > 30) {
+        return `${seconds} seconds ago`;
+    } else {
+        return 'Just now';
+    }
+}
+
+// Handle real-time search with debouncing
+function handleSearchKeyup(event) {
+    // Clear existing timeout
+    if (searchTimeout) {
+        clearTimeout(searchTimeout);
+    }
+    
+    // Set new timeout for 300ms delay
+    searchTimeout = setTimeout(() => {
+        loadTickers(1); // Reset to page 1 when searching
+    }, 300);
+}
+
+// Handle view type changes
+function handleViewChange() {
+    loadTickers(1); // Reset to page 1 when changing view
+}
 
 // Initialize the dashboard
 document.addEventListener('DOMContentLoaded', function() {
@@ -155,70 +198,168 @@ function updateButtonStates(runningProcesses) {
 
 async function loadTickers(page = 1) {
     const filter = document.getElementById('ticker-filter').value;
+    const search = document.getElementById('ticker-search').value;
+    const viewType = document.getElementById('view-type').value;
     const tableBody = document.getElementById('ticker-table');
     
     try {
+        // Update loading message based on view type
+        const loadingMessage = viewType === 'errors' ? 'Loading errors...' : 'Loading tickers...';
         tableBody.innerHTML = `
             <tr>
                 <td colspan="6" class="text-center">
                     <div class="spinner-border spinner-border-sm" role="status">
                         <span class="visually-hidden">Loading...</span>
                     </div>
-                    Loading tickers...
+                    ${loadingMessage}
                 </td>
             </tr>
         `;
 
-        const response = await fetch(`/api/tickers?page=${page}&limit=50&filter=${filter}`);
-        const data = await response.json();
+        let response, data;
         
-        if (data.tickers.length === 0) {
-            tableBody.innerHTML = `
-                <tr>
-                    <td colspan="6" class="text-center text-muted">
-                        No tickers found
-                    </td>
-                </tr>
-            `;
+        if (viewType === 'errors') {
+            // Load errors
+            response = await fetch(`/api/tickers/errors?page=${page}&limit=50&search=${encodeURIComponent(search)}`);
+            data = await response.json();
+            displayErrors(data);
         } else {
-            tableBody.innerHTML = data.tickers.map(ticker => `
-                <tr class="ticker-row">
-                    <td><strong>${ticker.ticker}</strong></td>
-                    <td>
-                        <span class="badge ${ticker.active ? 'bg-success' : 'bg-secondary'}">
-                            ${ticker.active ? 'Active' : 'Inactive'}
-                        </span>
-                    </td>
-                    <td>${ticker.price ? `$${ticker.price}` : 'N/A'}</td>
-                    <td>${ticker.exchange || 'N/A'}</td>
-                    <td>${ticker.last_checked ? new Date(ticker.last_checked).toLocaleString() : 'Never'}</td>
-                    <td>
-                        <button class="btn btn-sm btn-outline-primary" 
-                                onclick="validateRowTicker('${ticker.ticker}', this)"
-                                title="Validate ${ticker.ticker}">
-                            <i class="fas fa-check"></i>
-                        </button>
-                    </td>
-                </tr>
-            `).join('');
+            // Load tickers
+            response = await fetch(`/api/tickers?page=${page}&limit=50&filter=${filter}&search=${encodeURIComponent(search)}`);
+            data = await response.json();
+            displayTickers(data);
         }
         
-        updatePagination(data.page, Math.ceil(data.total / data.limit), data.total);
-        currentPage = page;
+        // Update pagination
+        updatePagination(data.total, page, 50, viewType);
         
     } catch (error) {
+        console.error('Error loading data:', error);
         tableBody.innerHTML = `
             <tr>
-                <td colspan="5" class="text-center text-danger">
-                    Error loading tickers: ${error.message}
+                <td colspan="6" class="text-center text-danger">
+                    Error loading data: ${error.message}
                 </td>
             </tr>
         `;
     }
 }
 
-function updatePagination(currentPage, totalPages, totalItems) {
+// Simple wrapper function for pagination compatibility
+function loadData(page = 1, viewType = null, search = null) {
+    // Update form values if provided
+    if (viewType) {
+        document.getElementById('view-type').value = viewType;
+    }
+    if (search !== null) {
+        document.getElementById('ticker-search').value = search;
+    }
+    
+    // Call the main load function
+    loadTickers(page);
+}
+
+function displayTickers(data) {
+    const tableBody = document.getElementById('ticker-table');
+    const tableHeader = document.getElementById('table-header');
+    
+    // Update table header for tickers
+    tableHeader.innerHTML = `
+        <tr>
+            <th>Ticker</th>
+            <th>Status</th>
+            <th>Price</th>
+            <th>Exchange</th>
+            <th>Last Updated</th>
+            <th>Actions</th>
+        </tr>
+    `;
+    
+    if (data.tickers.length === 0) {
+        const searchInfo = data.search ? ` matching "${data.search}"` : '';
+        tableBody.innerHTML = `
+            <tr>
+                <td colspan="6" class="text-center text-muted">
+                    No tickers found${searchInfo}
+                </td>
+            </tr>
+        `;
+    } else {
+        tableBody.innerHTML = data.tickers.map(ticker => `
+            <tr class="ticker-row">
+                <td><strong>${ticker.ticker}</strong></td>
+                <td>
+                    <span class="badge ${ticker.active ? 'bg-success' : 'bg-secondary'}">
+                        ${ticker.active ? 'Active' : 'Inactive'}
+                    </span>
+                </td>
+                <td>${ticker.price && ticker.price !== -1 ? `$${ticker.price}` : 'N/A'}</td>
+                <td>${ticker.exchange && ticker.exchange !== 'NOT_FOUND' ? ticker.exchange : 'N/A'}</td>
+                <td>${ticker.last_checked ? formatTimeAgo(ticker.last_checked) : 'Never'}</td>
+                <td>
+                    <button class="btn btn-sm btn-outline-primary" 
+                            onclick="validateRowTicker('${ticker.ticker}', this)"
+                            title="Validate ${ticker.ticker}">
+                        <i class="fas fa-check"></i>
+                    </button>
+                </td>
+            </tr>
+        `).join('');
+    }
+}
+
+function displayErrors(data) {
+    const tableBody = document.getElementById('ticker-table');
+    const tableHeader = document.getElementById('table-header');
+    
+    // Update table header for errors
+    tableHeader.innerHTML = `
+        <tr>
+            <th>Ticker</th>
+            <th>Error Type</th>
+            <th>Price</th>
+            <th>Exchange</th>
+            <th>Last Updated</th>
+            <th>Actions</th>
+        </tr>
+    `;
+    
+    if (data.errors.length === 0) {
+        const searchInfo = data.search ? ` matching "${data.search}"` : '';
+        tableBody.innerHTML = `
+            <tr>
+                <td colspan="6" class="text-center text-muted">
+                    No errors found${searchInfo}
+                </td>
+            </tr>
+        `;
+    } else {
+        tableBody.innerHTML = data.errors.map(error => `
+            <tr class="ticker-row">
+                <td><strong>${error.ticker}</strong></td>
+                <td>
+                    <span class="badge bg-danger">
+                        ${error.error_type}
+                    </span>
+                </td>
+                <td>${error.price && error.price !== -1 ? `$${error.price}` : 'N/A'}</td>
+                <td>${error.exchange && error.exchange !== 'NOT_FOUND' ? error.exchange : 'N/A'}</td>
+                <td>${error.last_checked ? formatTimeAgo(error.last_checked) : 'Never'}</td>
+                <td>
+                    <button class="btn btn-sm btn-outline-warning" 
+                            onclick="validateRowTicker('${error.ticker}', this)"
+                            title="Retry validation for ${error.ticker}">
+                        <i class="fas fa-redo"></i> Retry
+                    </button>
+                </td>
+            </tr>
+        `).join('');
+    }
+}
+
+function updatePagination(totalItems, currentPage, itemsPerPage, viewType = 'tickers') {
     const pagination = document.getElementById('pagination');
+    const totalPages = Math.ceil(totalItems / itemsPerPage);
     
     if (totalPages <= 1) {
         pagination.innerHTML = '';
@@ -226,11 +367,13 @@ function updatePagination(currentPage, totalPages, totalItems) {
     }
     
     let paginationHTML = '';
+    const searchInput = document.getElementById('search');
+    const search = searchInput ? searchInput.value : '';
     
     // Previous button
     paginationHTML += `
         <li class="page-item ${currentPage === 1 ? 'disabled' : ''}">
-            <a class="page-link" href="#" onclick="loadTickers(${currentPage - 1})">Previous</a>
+            <a class="page-link" href="#" onclick="loadData(${currentPage - 1}, '${viewType}', '${search}')">Previous</a>
         </li>
     `;
     
@@ -241,7 +384,7 @@ function updatePagination(currentPage, totalPages, totalItems) {
     for (let i = startPage; i <= endPage; i++) {
         paginationHTML += `
             <li class="page-item ${i === currentPage ? 'active' : ''}">
-                <a class="page-link" href="#" onclick="loadTickers(${i})">${i}</a>
+                <a class="page-link" href="#" onclick="loadData(${i}, '${viewType}', '${search}')">${i}</a>
             </li>
         `;
     }
@@ -249,7 +392,7 @@ function updatePagination(currentPage, totalPages, totalItems) {
     // Next button
     paginationHTML += `
         <li class="page-item ${currentPage === totalPages ? 'disabled' : ''}">
-            <a class="page-link" href="#" onclick="loadTickers(${currentPage + 1})">Next</a>
+            <a class="page-link" href="#" onclick="loadData(${currentPage + 1}, '${viewType}', '${search}')">Next</a>
         </li>
     `;
     
