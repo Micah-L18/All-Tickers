@@ -216,32 +216,49 @@
         <div class="row">
             <div class="col-md-12">
                 <div class="card">
-                    <div class="card-header d-flex justify-content-between align-items-center">
+                    <div class="card-header">
                         <h5><i class="fas fa-list"></i> Ticker Browser</h5>
-                        <div>
-                            <select class="form-select form-select-sm" id="ticker-filter" onchange="loadTickers(1)">
-                                <option value="all">All Tickers</option>
-                                <option value="active">Active Only</option>
-                                <option value="inactive">Inactive Only</option>
-                                <option value="validated">Validated Only</option>
-                            </select>
+                        <div class="row mt-3">
+                            <div class="col-md-5">
+                                <label for="ticker-search" class="form-label">Search Tickers</label>
+                                <input type="text" class="form-control form-control-sm" id="ticker-search" 
+                                       placeholder="Enter ticker symbol (e.g., AAPL)" 
+                                       onkeyup="handleSearchKeyup(event)">
+                            </div>
+                            <div class="col-md-3">
+                                <label for="ticker-filter" class="form-label">Filter</label>
+                                <select class="form-select form-select-sm" id="ticker-filter" onchange="loadTickers(1)">
+                                    <option value="all">All Tickers</option>
+                                    <option value="active">Active Only</option>
+                                    <option value="inactive">Inactive Only</option>
+                                    <option value="validated">Validated Only</option>
+                                </select>
+                            </div>
+                            <div class="col-md-4">
+                                <label for="view-type" class="form-label">View</label>
+                                <select class="form-select form-select-sm" id="view-type" onchange="handleViewChange()">
+                                    <option value="tickers">All Tickers</option>
+                                    <option value="errors">Errors Only</option>
+                                </select>
+                            </div>
                         </div>
                     </div>
                     <div class="card-body">
                         <div class="table-responsive">
                             <table class="table table-hover">
-                                <thead>
+                                <thead id="table-header">
                                     <tr>
                                         <th>Ticker</th>
                                         <th>Status</th>
                                         <th>Price</th>
                                         <th>Exchange</th>
                                         <th>Last Checked</th>
+                                        <th>Actions</th>
                                     </tr>
                                 </thead>
                                 <tbody id="ticker-table">
                                     <tr>
-                                        <td colspan="5" class="text-center">
+                                        <td colspan="6" class="text-center">
                                             <div class="spinner-border spinner-border-sm" role="status">
                                                 <span class="visually-hidden">Loading...</span>
                                             </div>

@@ -5,15 +5,44 @@ const path = require('path');
 class FastTickerValidator {
     constructor() {
         this.dbPath = path.join(__dirname, '..', 'db', 'tickers.db');
-        this.db = new sqlite3.Database(this.dbPath);
+        this.db = null; // Initialize as null, create connection when needed
         this.batchSize = 500; // Increased batch size
         this.delayMs = 200; // Reduced delay
         this.concurrentRequests = 25; // Allow multiple concurrent requests
         this.timeoutMs = 3000; // Faster timeout
+        this.maxRetries = 3; // Maximum database retry attempts
+        this.busyTimeout = 30000; // 30 second busy timeout
+    }
+
+    // Create database connection with proper settings
+    createConnection() {
+        return new Promise((resolve, reject) => {
+            const db = new sqlite3.Database(this.dbPath, (err) => {
+                if (err) {
+                    reject(err);
+                } else {
+                    // Configure database for better concurrency
+                    db.configure('busyTimeout', this.busyTimeout);
+                    db.run('PRAGMA journal_mode = WAL;'); // Write-Ahead Logging for better concurrency
+                    db.run('PRAGMA synchronous = NORMAL;'); // Balance between safety and performance
+                    db.run('PRAGMA temp_store = MEMORY;'); // Use memory for temporary storage
+                    db.run('PRAGMA mmap_size = 268435456;'); // 256MB memory mapping
+                    resolve(db);
+                }
+            });
+        });
+    }
+
+    // Ensure database connection exists
+    async ensureConnection() {
+        if (!this.db) {
+            this.db = await this.createConnection();
+        }
     }
 
     // Get tickers that haven't been validated yet (active = false and no price set)
     async getUnvalidatedTickers(limit = null) {
+        await this.ensureConnection();
         return new Promise((resolve, reject) => {
             let query = 'SELECT ticker FROM tickers WHERE active = 0 AND price IS NULL';
             if (limit) {
@@ -99,8 +128,37 @@ class FastTickerValidator {
         }
     }
 
-    // Bulk update tickers in database
+    // Bulk update tickers in database using retry logic
     async bulkUpdateTickers(tickerResults) {
+        await this.ensureConnection();
+        
+        for (let attempt = 1; attempt <= this.maxRetries; attempt++) {
+            try {
+                return await this.bulkUpdateTickersAttempt(tickerResults);
+            } catch (error) {
+                console.error(`❌ Database update attempt ${attempt} failed:`, error.message);
+                
+                if (attempt === this.maxRetries) {
+                    throw error;
+                }
+                
+                // Wait before retrying, with exponential backoff
+                const waitTime = 1000 * attempt;
+                console.log(`⏳ Waiting ${waitTime}ms before retry...`);
+                await new Promise(resolve => setTimeout(resolve, waitTime));
+                
+                // Recreate connection on retry
+                if (this.db) {
+                    this.db.close();
+                    this.db = null;
+                }
+                await this.ensureConnection();
+            }
+        }
+    }
+
+    // Single attempt at bulk database update
+    async bulkUpdateTickersAttempt(tickerResults) {
         return new Promise((resolve, reject) => {
             const query = `
                 UPDATE tickers 
@@ -108,14 +166,20 @@ class FastTickerValidator {
                 WHERE ticker = ?
             `;
             
-            const stmt = this.db.prepare(query);
-            this.db.run('BEGIN TRANSACTION');
-            
             let completed = 0;
             let errors = 0;
             
-            tickerResults.forEach(({ ticker, data }) => {
-                stmt.run([
+            // Process updates individually instead of using transactions
+            // This reduces the chance of locks and makes the process more resilient
+            const processUpdate = (index) => {
+                if (index >= tickerResults.length) {
+                    resolve({ completed, errors });
+                    return;
+                }
+                
+                const { ticker, data } = tickerResults[index];
+                
+                this.db.run(query, [
                     data.active ? 1 : 0,
                     data.price,
                     data.exchange,
@@ -128,14 +192,53 @@ class FastTickerValidator {
                     
                     completed++;
                     
-                    if (completed === tickerResults.length) {
-                        this.db.run('COMMIT');
-                        stmt.finalize();
-                        resolve({ completed, errors });
-                    }
+                    // Process next update after a small delay
+                    setTimeout(() => processUpdate(index + 1), 10);
                 });
-            });
+            };
+            
+            // Start processing
+            processUpdate(0);
         });
+    }
+
+    // Validate and update a single ticker
+    async validateSingleTicker(ticker) {
+        try {
+            console.log(`🔍 Validating single ticker: ${ticker}`);
+            
+            // Validate the ticker
+            const validationResult = await this.validateTickerFast(ticker);
+            
+            // Update database
+            const updateResult = await this.bulkUpdateTickers([{
+                ticker: ticker,
+                data: validationResult
+            }]);
+            
+            const result = {
+                ticker: ticker,
+                success: updateResult.errors === 0,
+                validation: validationResult,
+                status: validationResult.active ? 'active' : 'inactive',
+                message: validationResult.active 
+                    ? `Active: $${validationResult.price} on ${validationResult.exchange}`
+                    : `Inactive: ${validationResult.exchange}`
+            };
+            
+            console.log(`${validationResult.active ? '✅' : '❌'} ${ticker}: ${result.message}`);
+            return result;
+            
+        } catch (error) {
+            console.error(`❌ Error validating ${ticker}:`, error.message);
+            return {
+                ticker: ticker,
+                success: false,
+                validation: { active: false, price: null, exchange: 'ERROR' },
+                status: 'error',
+                message: `Error: ${error.message}`
+            };
+        }
     }
 
     // Process a batch with concurrent validation
@@ -185,7 +288,9 @@ class FastTickerValidator {
             })));
             console.log(`💾 Database updated: ${updateResults.completed} tickers, ${updateResults.errors} errors`);
         } catch (error) {
-            console.error('❌ Bulk update failed:', error);
+            console.error('❌ Bulk update failed after all retries:', error);
+            console.error('❌ Error details:', error.message);
+            console.log('⚠️  Continuing with process...');
             results.errors += allResults.length;
         }
         
@@ -194,6 +299,7 @@ class FastTickerValidator {
 
     // Get current database statistics
     async getStats() {
+        await this.ensureConnection();
         return new Promise((resolve, reject) => {
             const query = `
                 SELECT 
@@ -291,13 +397,15 @@ class FastTickerValidator {
 
     // Close database connection
     close() {
-        this.db.close((err) => {
-            if (err) {
-                console.error('❌ Error closing database:', err);
-            } else {
-                console.log('✅ Database connection closed');
-            }
-        });
+        if (this.db) {
+            this.db.close((err) => {
+                if (err) {
+                    console.error('❌ Error closing database:', err);
+                } else {
+                    console.log('✅ Database connection closed');
+                }
+            });
+        }
     }
 }
 
