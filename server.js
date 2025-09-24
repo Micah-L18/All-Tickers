@@ -1,9 +1,10 @@
 const express = require('express');
 const path = require('path');
 const { spawn } = require('child_process');
-const sqlite3 = require('sqlite3').verbose();
 const fs = require('fs');
 const cors = require('cors');
+const PostgreSQLManager = require('./src/db/database-manager');
+require('dotenv').config();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -33,83 +34,36 @@ app.use(cors());
 app.use(express.static('public'));
 app.use(express.json());
 
-// Database path
-const dbPath = path.join(__dirname, 'src', 'db', 'tickers.db');
+// Initialize PostgreSQL database manager
+const dbManager = new PostgreSQLManager();
+
+// Connect to database on startup
+async function initializeDatabase() {
+    try {
+        await dbManager.connect();
+        console.log('✅ Database connected successfully');
+    } catch (error) {
+        console.error('❌ Failed to connect to database:', error.message);
+        process.exit(1);
+    }
+}
+
+// Initialize database connection
+initializeDatabase();
 
 // API Routes
 app.get('/api/status', async (req, res) => {
     try {
-        if (!fs.existsSync(dbPath)) {
-            return res.json({ 
-                status: 'no_database',
-                message: 'No database found. Please generate tickers first.',
-                stats: null
-            });
-        }
-
-        const db = new sqlite3.Database(dbPath);
+        const stats = await dbManager.getStats();
         
-        const stats = await new Promise((resolve, reject) => {
-            // First check if ticker_data table exists
-            db.all(`
-                SELECT name FROM sqlite_master WHERE type='table' AND name='ticker_data'
-            `, (err, tables) => {
-                if (err) {
-                    reject(err);
-                    return;
-                }
-                
-                const hasTickerDataTable = tables.length > 0;
-                
-                let query = `
-                    SELECT 
-                        COUNT(*) as total,
-                        SUM(CASE WHEN active = 1 THEN 1 ELSE 0 END) as active,
-                        SUM(CASE WHEN last_checked IS NOT NULL THEN 1 ELSE 0 END) as validated,
-                        COUNT(DISTINCT exchange) as exchanges,
-                        -- Tickers needing validation (never validated or > 5 days old)
-                        SUM(CASE WHEN last_checked IS NULL OR 
-                            julianday('now') - julianday(last_checked) > 5 THEN 1 ELSE 0 END) as need_validation
-                `;
-                
-                if (hasTickerDataTable) {
-                    query += `,
-                        -- Active tickers needing data gathering update (> 1 day old or never updated)
-                        SUM(CASE WHEN active = 1 AND (
-                            ticker NOT IN (SELECT ticker FROM ticker_data) OR
-                            julianday('now') - julianday((SELECT last_updated FROM ticker_data WHERE ticker_data.ticker = tickers.ticker)) > 1
-                        ) THEN 1 ELSE 0 END) as need_data_update
-                    `;
-                } else {
-                    query += `,
-                        -- All active tickers need data update (table doesn't exist yet)
-                        SUM(CASE WHEN active = 1 THEN 1 ELSE 0 END) as need_data_update
-                    `;
-                }
-                
-                query += ` FROM tickers`;
-                
-                db.all(query, (err, rows) => {
-                    if (err) reject(err);
-                    else resolve(rows[0]);
-                });
-            });
-        });
-
-        const recentActivity = await new Promise((resolve, reject) => {
-            db.all(`
-                SELECT ticker, active, price, exchange, last_checked 
-                FROM tickers 
-                WHERE last_checked IS NOT NULL 
-                ORDER BY last_checked DESC 
-                LIMIT 10
-            `, (err, rows) => {
-                if (err) reject(err);
-                else resolve(rows);
-            });
-        });
-
-        db.close();
+        // Get recent activity - last 10 updated tickers
+        const recentActivity = await dbManager.query(`
+            SELECT symbol, exchange, active, price, last_updated 
+            FROM tickers 
+            WHERE last_updated IS NOT NULL 
+            ORDER BY last_updated DESC 
+            LIMIT 10
+        `);
 
         // Get running process information
         const runningProcessInfo = Array.from(runningProcesses.entries()).map(([processId, process]) => {
@@ -129,7 +83,7 @@ app.get('/api/status', async (req, res) => {
         res.json({
             status: 'ready',
             stats,
-            recentActivity,
+            recentActivity: recentActivity.rows,
             runningProcesses: runningProcessInfo
         });
 
@@ -143,61 +97,59 @@ app.get('/api/tickers', async (req, res) => {
         const { page = 1, limit = 50, filter = 'all', search = '' } = req.query;
         const offset = (page - 1) * limit;
 
-        if (!fs.existsSync(dbPath)) {
-            return res.json({ tickers: [], total: 0 });
-        }
-
-        const db = new sqlite3.Database(dbPath);
-
-        let whereClause = '';
-        let queryParams = [];
+        // Use the PostgreSQL manager's search function
+        const searchTerm = search && search.trim() ? search.trim().toUpperCase() : '';
+        let tickers;
         
-        // Build WHERE clause for filtering
-        const conditions = [];
-        
-        if (filter === 'active') conditions.push('active = 1');
-        else if (filter === 'inactive') conditions.push('active = 0');
-        else if (filter === 'validated') conditions.push('last_checked IS NOT NULL');
-        
-        // Add search functionality
-        if (search && search.trim()) {
-            conditions.push('ticker LIKE ?');
-            queryParams.push(`%${search.trim().toUpperCase()}%`);
-        }
-        
-        if (conditions.length > 0) {
-            whereClause = 'WHERE ' + conditions.join(' AND ');
-        }
-
-        // Add limit and offset to query params
-        queryParams.push(limit, offset);
-
-        const tickers = await new Promise((resolve, reject) => {
-            db.all(`
-                SELECT ticker, active, price, exchange, last_checked 
-                FROM tickers 
+        if (searchTerm) {
+            tickers = await dbManager.searchTickers(searchTerm, parseInt(limit), parseInt(offset));
+        } else {
+            // Build filter conditions for PostgreSQL
+            let whereClause = '';
+            const queryParams = [];
+            let paramIndex = 1;
+            
+            if (filter === 'active') {
+                whereClause = 'WHERE t.active = true';
+            } else if (filter === 'inactive') {
+                whereClause = 'WHERE t.active = false';
+            } else if (filter === 'validated') {
+                whereClause = 'WHERE t.last_updated IS NOT NULL';
+            }
+            
+            queryParams.push(limit, offset);
+            
+            const query = `
+                SELECT t.symbol as ticker, t.exchanges, t.active, t.price, t.last_updated as last_checked,
+                       tq.regular_market_price, tq.market_cap, tq.quote_time
+                FROM tickers t
+                LEFT JOIN LATERAL (
+                    SELECT * FROM ticker_quotes 
+                    WHERE ticker_id = t.id 
+                    ORDER BY quote_time DESC 
+                    LIMIT 1
+                ) tq ON true
                 ${whereClause}
-                ORDER BY ticker 
-                LIMIT ? OFFSET ?
-            `, queryParams, (err, rows) => {
-                if (err) reject(err);
-                else resolve(rows);
-            });
-        });
+                ORDER BY t.symbol
+                LIMIT $${paramIndex++} OFFSET $${paramIndex++}
+            `;
+            
+            const result = await dbManager.query(query, queryParams);
+            tickers = result.rows;
+        }
 
-        const total = await new Promise((resolve, reject) => {
-            const countParams = queryParams.slice(0, -2); // Remove limit and offset
-            db.get(`SELECT COUNT(*) as count FROM tickers ${whereClause}`, countParams, (err, row) => {
-                if (err) reject(err);
-                else resolve(row.count);
-            });
-        });
-
-        db.close();
+        // Get total count
+        const totalResult = await dbManager.query(`
+            SELECT COUNT(*) as count FROM tickers t
+            ${filter === 'active' ? 'WHERE t.active = true' : 
+              filter === 'inactive' ? 'WHERE t.active = false' : 
+              filter === 'validated' ? 'WHERE t.last_updated IS NOT NULL' : ''}
+            ${searchTerm ? (filter !== 'all' ? ' AND ' : 'WHERE ') + 't.symbol ILIKE $1' : ''}
+        `, searchTerm ? [`%${searchTerm}%`] : []);
 
         res.json({ 
             tickers, 
-            total, 
+            total: parseInt(totalResult.rows[0].count), 
             page: parseInt(page), 
             limit: parseInt(limit),
             search: search || '',
@@ -215,58 +167,42 @@ app.get('/api/tickers/errors', async (req, res) => {
         const { page = 1, limit = 50, search = '' } = req.query;
         const offset = (page - 1) * limit;
 
-        if (!fs.existsSync(dbPath)) {
-            return res.json({ errors: [], total: 0 });
-        }
-
-        const db = new sqlite3.Database(dbPath);
-
-        let whereClause = 'WHERE (active = 0 OR price = -1 OR exchange = "NOT_FOUND" OR exchange IS NULL)';
-        let queryParams = [];
+        let whereClause = `WHERE (t.active = false OR t.price = -1 OR array_length(t.exchanges, 1) IS NULL)`;
+        const queryParams = [];
+        let paramIndex = 1;
         
         // Add search functionality for errors
         if (search && search.trim()) {
-            whereClause += ' AND ticker LIKE ?';
+            whereClause += ` AND t.symbol ILIKE $${paramIndex++}`;
             queryParams.push(`%${search.trim().toUpperCase()}%`);
         }
         
         // Add limit and offset to query params
         queryParams.push(limit, offset);
 
-        const errors = await new Promise((resolve, reject) => {
-            db.all(`
-                SELECT ticker, active, price, exchange, last_checked,
-                       CASE 
-                           WHEN active = 0 AND exchange = "NOT_FOUND" THEN "Ticker not found"
-                           WHEN active = 0 AND price = -1 THEN "Price unavailable"
-                           WHEN exchange = "NOT_FOUND" THEN "Exchange not found"
-                           WHEN exchange IS NULL THEN "No exchange data"
-                           WHEN price = -1 THEN "Price fetch failed"
-                           ELSE "Unknown error"
-                       END as error_type
-                FROM tickers 
-                ${whereClause}
-                ORDER BY last_checked DESC, ticker 
-                LIMIT ? OFFSET ?
-            `, queryParams, (err, rows) => {
-                if (err) reject(err);
-                else resolve(rows);
-            });
-        });
+        const errors = await dbManager.query(`
+            SELECT t.symbol as ticker, t.active, t.price, t.exchanges, t.last_updated as last_checked,
+                   CASE 
+                       WHEN t.active = false THEN 'Ticker inactive'
+                       WHEN t.price = -1 THEN 'Price unavailable'
+                       WHEN array_length(t.exchanges, 1) IS NULL THEN 'No exchange data'
+                       ELSE 'Unknown error'
+                   END as error_type
+            FROM tickers t
+            ${whereClause}
+            ORDER BY t.last_updated DESC, t.symbol 
+            LIMIT $${paramIndex++} OFFSET $${paramIndex++}
+        `, queryParams);
 
-        const total = await new Promise((resolve, reject) => {
-            const countParams = queryParams.slice(0, -2); // Remove limit and offset
-            db.get(`SELECT COUNT(*) as count FROM tickers ${whereClause}`, countParams, (err, row) => {
-                if (err) reject(err);
-                else resolve(row.count);
-            });
-        });
-
-        db.close();
+        const totalResult = await dbManager.query(`
+            SELECT COUNT(*) as count 
+            FROM tickers t
+            ${whereClause.replace(/LIMIT.*/, '')}
+        `, queryParams.slice(0, -2)); // Remove limit and offset
 
         res.json({ 
-            errors, 
-            total, 
+            errors: errors.rows, 
+            total: parseInt(totalResult.rows[0].count), 
             page: parseInt(page), 
             limit: parseInt(limit),
             search: search || ''
@@ -277,66 +213,50 @@ app.get('/api/tickers/errors', async (req, res) => {
     }
 });
 
-// API endpoint to get all available stock data from ticker_data.db
+// API endpoint to get all available stock data
 app.get('/api/stock-data/all', async (req, res) => {
     try {
         const { page = 1, limit = 10 } = req.query; // Reduced default limit
         const offset = (page - 1) * limit;
         
-        const tickerDataDbPath = path.join(__dirname, 'src', 'db', 'ticker_data.db');
-        
-        if (!fs.existsSync(tickerDataDbPath)) {
-            return res.json({ 
-                success: false,
-                data: [], 
-                total: 0, 
-                message: 'ticker_data.db not found. Run data gathering first.' 
-            });
-        }
+        // Get ticker metadata with latest quote information
+        const result = await dbManager.query(`
+            SELECT t.symbol as ticker, t.last_updated, t.created_at,
+                   tq.regular_market_price, tq.market_cap, tq.quote_time,
+                   (SELECT COUNT(*) FROM ticker_historical WHERE ticker_id = t.id) as historical_count
+            FROM tickers t
+            LEFT JOIN LATERAL (
+                SELECT * FROM ticker_quotes 
+                WHERE ticker_id = t.id 
+                ORDER BY quote_time DESC 
+                LIMIT 1
+            ) tq ON true
+            WHERE t.active = true
+            ORDER BY t.last_updated DESC
+            LIMIT $1 OFFSET $2
+        `, [limit, offset]);
 
-        const db = new sqlite3.Database(tickerDataDbPath);
+        const totalResult = await dbManager.query(`
+            SELECT COUNT(*) as count FROM tickers WHERE active = true
+        `);
 
-        // Get ticker metadata without parsing large JSON initially
-        const allData = await new Promise((resolve, reject) => {
-            db.all(`
-                SELECT ticker, last_updated, created_at, LENGTH(json_data) as data_size
-                FROM ticker_data 
-                ORDER BY last_updated DESC
-                LIMIT ? OFFSET ?
-            `, [limit, offset], (err, rows) => {
-                if (err) reject(err);
-                else {
-                    // For each ticker, get a summary of available data
-                    const summaryData = rows.map(row => {
-                        return {
-                            ticker: row.ticker,
-                            last_updated: row.last_updated,
-                            created_at: row.created_at,
-                            data_size_kb: (row.data_size / 1024).toFixed(2),
-                            has_data: row.data_size > 0
-                        };
-                    });
-                    resolve(summaryData);
-                }
-            });
-        });
-
-        const total = await new Promise((resolve, reject) => {
-            db.get(`SELECT COUNT(*) as count FROM ticker_data`, (err, row) => {
-                if (err) reject(err);
-                else resolve(row.count);
-            });
-        });
-
-        db.close();
+        const summaryData = result.rows.map(row => ({
+            ticker: row.ticker,
+            last_updated: row.last_updated,
+            created_at: row.created_at,
+            current_price: row.regular_market_price,
+            market_cap: row.market_cap,
+            historical_count: parseInt(row.historical_count),
+            has_data: parseInt(row.historical_count) > 0
+        }));
 
         res.json({ 
             success: true,
-            data: allData, 
-            total, 
+            data: summaryData, 
+            total: parseInt(totalResult.rows[0].count), 
             page: parseInt(page), 
             limit: parseInt(limit),
-            message: `Retrieved ${allData.length} of ${total} total stock records (summary view)`
+            message: `Retrieved ${summaryData.length} of ${totalResult.rows[0].count} total active stock records`
         });
 
     } catch (error) {
@@ -347,36 +267,14 @@ app.get('/api/stock-data/all', async (req, res) => {
     }
 });
 
-// API endpoint to get all data for a specific stock from ticker_data.db
+// API endpoint to get all data for a specific stock
 app.get('/api/stock-data/:ticker', async (req, res) => {
     try {
         const ticker = req.params.ticker.toUpperCase();
+        const [symbol, exchange] = ticker.includes('.') ? ticker.split('.') : [ticker, 'NYSE'];
         
-        const tickerDataDbPath = path.join(__dirname, 'src', 'db', 'ticker_data.db');
-        
-        if (!fs.existsSync(tickerDataDbPath)) {
-            return res.json({ 
-                success: false,
-                found: false,
-                ticker,
-                message: 'ticker_data.db not found. Run data gathering first.' 
-            });
-        }
-
-        const db = new sqlite3.Database(tickerDataDbPath);
-
-        const stockData = await new Promise((resolve, reject) => {
-            db.get(`
-                SELECT ticker, last_updated, json_data, created_at 
-                FROM ticker_data 
-                WHERE ticker = ?
-            `, [ticker], (err, row) => {
-                if (err) reject(err);
-                else resolve(row);
-            });
-        });
-
-        db.close();
+        // Use the PostgreSQL manager's getTickerData method
+        const stockData = await dbManager.getTickerData(symbol, exchange);
 
         if (!stockData) {
             return res.json({ 
@@ -387,26 +285,13 @@ app.get('/api/stock-data/:ticker', async (req, res) => {
             });
         }
 
-        // Parse the JSON data
-        let parsedData = null;
-        try {
-            parsedData = JSON.parse(stockData.json_data);
-        } catch (e) {
-            return res.json({ 
-                success: false,
-                found: true,
-                ticker,
-                error: 'Failed to parse JSON data for this ticker'
-            });
-        }
-
         res.json({ 
             success: true,
             found: true,
-            ticker,
-            last_updated: stockData.last_updated,
-            created_at: stockData.created_at,
-            data: parsedData,
+            ticker: stockData.ticker,
+            last_updated: stockData.lastUpdated,
+            created_at: stockData.createdAt,
+            data: stockData.data,
             message: `Complete data retrieved for ${ticker}`
         });
 
@@ -418,87 +303,45 @@ app.get('/api/stock-data/:ticker', async (req, res) => {
     }
 });
 
-// API endpoint to read ticker data from ticker_data.db
+// API endpoint to read ticker data from PostgreSQL
 app.get('/api/ticker-data', async (req, res) => {
     try {
         const { page = 1, limit = 50, ticker } = req.query;
-        const offset = (page - 1) * limit;
         
-        const tickerDataDbPath = path.join(__dirname, 'src', 'db', 'ticker_data.db');
+        // Use the PostgreSQL manager's getTickerDataPaginated method
+        const result = await dbManager.getTickerDataPaginated(page, limit, ticker);
         
-        if (!fs.existsSync(tickerDataDbPath)) {
-            return res.json({ 
-                data: [], 
-                total: 0, 
-                message: 'ticker_data.db not found. Run data gathering first.' 
-            });
-        }
-
-        const db = new sqlite3.Database(tickerDataDbPath);
-
-        // If specific ticker requested
+        // If specific ticker requested, return simplified format
         if (ticker) {
-            const tickerData = await new Promise((resolve, reject) => {
-                db.get(`
-                    SELECT ticker, last_updated, json_data, created_at 
-                    FROM ticker_data 
-                    WHERE ticker = ?
-                `, [ticker.toUpperCase()], (err, row) => {
-                    if (err) reject(err);
-                    else resolve(row);
-                });
-            });
-
-            db.close();
-
-            if (tickerData) {
-                // Parse the JSON data for easier consumption
-                try {
-                    tickerData.parsed_data = JSON.parse(tickerData.json_data);
-                } catch (e) {
-                    tickerData.parsed_data = null;
-                }
-            }
-
+            const tickerData = result.data.length > 0 ? result.data[0] : null;
             return res.json({ 
-                data: tickerData || null, 
+                data: tickerData, 
                 found: !!tickerData,
                 ticker: ticker.toUpperCase()
             });
         }
 
-        // Get paginated data
-        const tickerData = await new Promise((resolve, reject) => {
-            db.all(`
-                SELECT ticker, last_updated, created_at,
-                       LENGTH(json_data) as data_size
-                FROM ticker_data 
-                ORDER BY last_updated DESC
-                LIMIT ? OFFSET ?
-            `, [limit, offset], (err, rows) => {
-                if (err) reject(err);
-                else resolve(rows);
-            });
-        });
-
-        const total = await new Promise((resolve, reject) => {
-            db.get(`SELECT COUNT(*) as count FROM ticker_data`, (err, row) => {
-                if (err) reject(err);
-                else resolve(row.count);
-            });
-        });
-
-        db.close();
+        // For paginated data, add data size information (JSON length)
+        const dataWithSize = result.data.map(row => ({
+            ticker: row.ticker,
+            last_updated: row.last_updated,
+            created_at: row.created_at,
+            data_size: JSON.stringify(row.json_data).length
+        }));
 
         res.json({ 
-            data: tickerData, 
-            total, 
-            page: parseInt(page), 
-            limit: parseInt(limit) 
+            data: dataWithSize, 
+            total: result.total, 
+            page: result.page, 
+            limit: result.limit,
+            totalPages: result.totalPages
         });
 
     } catch (error) {
-        res.status(500).json({ error: error.message });
+        res.status(500).json({ 
+            error: error.message,
+            message: 'Error retrieving ticker data from PostgreSQL'
+        });
     }
 });
 
@@ -775,6 +618,44 @@ app.post('/api/kill-process', (req, res) => {
         });
     } catch (error) {
         res.status(500).json({ error: `Failed to kill process: ${error.message}` });
+    }
+});
+
+// SQLite Export endpoint
+app.post('/api/export-sqlite', async (req, res) => {
+    try {
+        const { filename, options = {} } = req.body;
+        
+        if (!filename) {
+            return res.status(400).json({ error: 'Filename is required' });
+        }
+        
+        // Ensure .db extension
+        const dbFilename = filename.endsWith('.db') ? filename : `${filename}.db`;
+        const exportPath = path.join(__dirname, 'src', 'db', dbFilename);
+        
+        console.log(`📤 Starting SQLite export to: ${exportPath}`);
+        
+        // Default export options
+        const exportOptions = {
+            includeTickerData: options.includeTickerData !== false,
+            includeHistorical: options.includeHistorical !== false,
+            historicalLimit: options.historicalLimit || 100000
+        };
+        
+        const result = await dbManager.exportToSQLite(exportPath, exportOptions);
+        
+        res.json({
+            success: true,
+            message: `SQLite export completed successfully`,
+            result
+        });
+        
+    } catch (error) {
+        console.error('❌ SQLite export error:', error);
+        res.status(500).json({ 
+            error: `Failed to export to SQLite: ${error.message}` 
+        });
     }
 });
 

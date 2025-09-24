@@ -1,25 +1,17 @@
 {
   "name": "all-tickers-postgresql",
   "version": "1.0.0",
-  "description": "PostgreSQL setup and database manager for All-Tickers application",
+  "description": "PostgreSQL setup for All-Tickers application",
   "main": "database-manager.js",
   "scripts": {
     "test": "node test-connection.js",
-    "setup": "./setup-postgresql.sh",
-    "migrate": "node migrate-from-sqlite.js"
+    "setup": "./setup-postgresql.sh"
   },
   "dependencies": {
     "pg": "^8.11.0",
-    "dotenv": "^16.0.0",
-    "sqlite3": "^5.1.6"
+    "dotenv": "^16.0.0"
   },
-  "devDependencies": {
-    "jest": "^29.0.0"
-  },
-  "keywords": ["postgresql", "finance", "tickers", "database", "migration"],
+  "keywords": ["postgresql", "finance", "tickers"],
   "author": "All-Tickers",
-  "license": "MIT",
-  "engines": {
-    "node": ">=14.0.0"
-  }
+  "license": "MIT"
 }

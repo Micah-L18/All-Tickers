@@ -1,7 +1,8 @@
 const yahooFinance = require('yahoo-finance2').default;
 const fs = require('fs');
 const path = require('path');
-const Database = require('sqlite3').Database;
+const PostgreSQLManager = require('../db/database-manager');
+require('dotenv').config();
 
 // Suppress Yahoo Finance validation warnings and errors
 yahooFinance.suppressNotices(['yahooSurvey', 'ripHistorical']);
@@ -49,153 +50,75 @@ function hasValidationWarning(ticker) {
 
 class TickerDataDatabase {
     constructor() {
-        const dbDir = path.join(__dirname, '..', 'db');
-        
-        // Ensure the db directory exists
-        if (!fs.existsSync(dbDir)) {
-            fs.mkdirSync(dbDir, { recursive: true });
-        }
-        
-        const dbPath = path.join(dbDir, 'ticker_data.db');
-        this.db = new Database(dbPath);
-        
-        // Also connect to the validation database to mark inactive tickers
-        const validationDbPath = path.join(dbDir, 'tickers.db');
-        this.validationDb = new Database(validationDbPath);
-        
-        this.initializeDatabase();
+        this.dbManager = new PostgreSQLManager();
     }
 
-    initializeDatabase() {
-        const createTableSQL = `
-            CREATE TABLE IF NOT EXISTS ticker_data (
-                ticker TEXT PRIMARY KEY,
-                last_updated DATETIME DEFAULT CURRENT_TIMESTAMP,
-                json_data TEXT NOT NULL,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            )
-        `;
-        
-        this.db.run(createTableSQL, (err) => {
-            if (err) {
-                console.error('Error creating table:', err);
-            } else {
-                console.log('✅ Database initialized successfully');
-            }
-        });
+    async initializeDatabase() {
+        await this.dbManager.connect();
+        console.log('✅ PostgreSQL ticker data system initialized');
     }
 
     async insertOrUpdateTicker(ticker, jsonData) {
-        return new Promise((resolve, reject) => {
-           const sql = `
-                INSERT OR REPLACE INTO ticker_data (ticker, last_updated, json_data)
-                VALUES (?, CURRENT_TIMESTAMP, ?)
-            `;
-            
-            this.db.run(sql, [ticker, JSON.stringify(jsonData)], function(err) {
-                if (err) {
-                    reject(err);
-                } else {
-                    resolve({ ticker, rowId: this.lastID, changes: this.changes });
-                }
-            });
-        });
+        return await this.dbManager.insertOrUpdateTickerData(ticker, jsonData);
     }
 
     async getTickerCount() {
-        return new Promise((resolve, reject) => {
-            this.db.get('SELECT COUNT(*) as count FROM ticker_data', (err, row) => {
-                if (err) {
-                    reject(err);
-                } else {
-                    resolve(row.count);
-                }
-            });
-        });
+        return await this.dbManager.getTickerDataCount();
     }
 
     async getRecentlyUpdated(limit = 10) {
-        return new Promise((resolve, reject) => {
-            const sql = `
-                SELECT ticker, last_updated 
-                FROM ticker_data 
-                ORDER BY last_updated DESC 
-                LIMIT ?
-            `;
-            
-            this.db.all(sql, [limit], (err, rows) => {
-                if (err) {
-                    reject(err);
-                } else {
-                    resolve(rows);
-                }
-            });
-        });
+        return await this.dbManager.getRecentlyUpdatedTickerData(limit);
     }
 
     async isTickerRecentlyChecked(ticker, hoursAgo = 24) {
-        return new Promise((resolve, reject) => {
-            const sql = `
-                SELECT ticker, last_updated,
-                       (julianday('now') - julianday(last_updated)) * 24 as hours_diff
-                FROM ticker_data 
-                WHERE ticker = ? 
-                AND (julianday('now') - julianday(last_updated)) * 24 < ?
-            `;
-            
-            this.db.get(sql, [ticker, hoursAgo], (err, row) => {
-                if (err) {
-                    reject(err);
-                } else {
-                    resolve({
-                        isRecent: !!row,
-                        lastUpdated: row ? row.last_updated : null,
-                        hoursSince: row ? Math.round(row.hours_diff * 100) / 100 : null
-                    });
-                }
-            });
-        });
+        return await this.dbManager.isTickerRecentlyChecked(ticker, hoursAgo);
     }
 
     async markTickerInactive(ticker, reason = 'Schema validation error') {
-        return new Promise((resolve, reject) => {
-            const sql = `
-                UPDATE tickers 
-                SET active = 0, price = -1, exchange = ? 
-                WHERE ticker = ?
-            `;
+        try {
+            // Parse ticker to get symbol and exchange
+            const [symbol, exchange] = ticker.includes('.') ? 
+                ticker.split('.') : [ticker, 'NYSE'];
             
-            this.validationDb.run(sql, [`INACTIVE_${reason}`, ticker], function(err) {
-                if (err) {
-                    console.log(`⚠️  Could not mark ${ticker} as inactive in validation DB: ${err.message}`);
-                    reject(err);
-                } else {
-                    console.log(`🔄 Marked ${ticker} as inactive due to: ${reason}`);
-                    resolve({ ticker, changes: this.changes });
-                }
+            // Update the ticker as inactive in the main tickers table
+            await this.dbManager.updateTicker(symbol, {
+                active: false,
+                price: -1
             });
-        });
+            
+            console.log(`🔄 Marked ${ticker} as inactive due to: ${reason}`);
+            return { ticker, success: true };
+        } catch (error) {
+            console.log(`⚠️  Could not mark ${ticker} as inactive: ${error.message}`);
+            throw error;
+        }
     }
 
-    close() {
-        return new Promise((resolve) => {
-            // Close main database
-            this.db.close((err) => {
-                if (err) {
-                    console.error('Error closing main database:', err);
-                }
-                
-                // Close validation database
-                this.validationDb.close((err2) => {
-                    if (err2) {
-                        console.error('Error closing validation database:', err2);
-                    } else {
-                        console.log('✅ Database connections closed');
-                    }
-                    resolve();
-                });
+    async markTickerActive(ticker, price) {
+        try {
+            // Parse ticker to get symbol and exchange
+            const [symbol, exchange] = ticker.includes('.') ? 
+                ticker.split('.') : [ticker, 'NYSE'];
+            
+            // Update the ticker as active in the main tickers table
+            await this.dbManager.updateTicker(symbol, {
+                active: true,
+                price: price
             });
-        });
+            
+            console.log(`✅ Marked ${ticker} as active with price: $${price}`);
+            return { ticker, success: true };
+        } catch (error) {
+            console.log(`⚠️  Could not mark ${ticker} as active: ${error.message}`);
+            throw error;
+        }
+    }
+
+    async close() {
+        if (this.dbManager) {
+            await this.dbManager.disconnect();
+            console.log('✅ Database connections closed');
+        }
     }
 }
 
@@ -248,430 +171,395 @@ async function getTickerData(symbol) {
                     averageClose: (historicalData.reduce((sum, day) => sum + (day.close || 0), 0) / historicalData.length).toFixed(2),
                     highestClose: Math.max(...historicalData.map(day => day.close || 0)).toFixed(2),
                     lowestClose: Math.min(...historicalData.map(day => day.close || 0)).toFixed(2),
-                    averageVolume: Math.round(historicalData.reduce((sum, day) => sum + (day.volume || 0), 0) / historicalData.length),
-                    priceChange: historicalData.length > 1 ? 
-                        ((historicalData[historicalData.length - 1].close - historicalData[0].close) / historicalData[0].close * 100).toFixed(2) + '%' 
-                        : 'N/A'
+                    priceRange: (Math.max(...historicalData.map(day => day.close || 0)) - Math.min(...historicalData.map(day => day.close || 0))).toFixed(2)
+                } : null,
+                // Basic quote statistics
+                quoteStats: quote ? {
+                    currentPrice: quote.regularMarketPrice || quote.price || 'N/A',
+                    marketCap: quote.marketCap || 'N/A',
+                    volume: quote.regularMarketVolume || quote.volume || 'N/A',
+                    peRatio: quote.trailingPE || 'N/A'
                 } : null
             }
         };
 
         return tickerDataWithMetadata;
-        
     } catch (error) {
-        // Clear current ticker
-        setCurrentProcessingTicker(null);
+        console.error(`❌ Error fetching data for ${symbol}:`, error.message);
         
-        // Detect schema/validation errors
-        const isSchemaError = error.message && (
-            error.message.includes('Expected union value') ||
-            error.message.includes('validation') ||
-            error.message.includes('schema') ||
-            error.message.includes('Invalid response') ||
-            error.message.toLowerCase().includes('yahoo-finance2')
-        );
-        
+        // Return error structure
         return {
             metadata: {
                 symbol: symbol,
                 fetchDate: new Date().toISOString(),
                 dataSource: 'Yahoo Finance API (yahoo-finance2)',
                 version: '2.0.0',
-                error: error.message,
-                errorType: isSchemaError ? 'SCHEMA_VALIDATION' : 'API_ERROR',
+                error: true,
+                errorMessage: error.message,
                 hadValidationWarnings: hasValidationWarning(symbol)
             },
             quote: null,
             historical: null,
             summary: null,
-            statistics: null
+            error: error.message
         };
     }
 }
 
-async function saveTickerDataToDB(symbol, database) {
-    try {
-        const data = await getTickerData(symbol);
-        
-        // Check if this is a schema validation error OR had validation warnings
-        const hasSchemaIssues = (data.metadata.error && data.metadata.errorType === 'SCHEMA_VALIDATION') || 
-                               data.metadata.hadValidationWarnings;
-        
-        // Check for specific errors that should mark ticker as delisted/inactive
-        const shouldMarkDelisted = data.metadata.error && (
-            data.metadata.error.includes('No fundamentals data found for symbol') ||
-            data.metadata.error.includes('1d data not available for startTime') ||
-            data.metadata.error.includes('Only 100 years worth of day granularity data are allowed') ||
-            data.metadata.error.includes('Ticker not found') ||
-            data.metadata.error.includes('Invalid ticker') ||
-            data.metadata.error.includes('Symbol not found') ||
-            data.metadata.error.includes('No data found for this date range')
-        );
-        
-        if (hasSchemaIssues) {
-            // Mark as inactive in validation database
-            try {
-                const reason = data.metadata.error ? 'Schema validation error' : 'Validation warnings';
-                await database.markTickerInactive(symbol, reason);
-            } catch (markError) {
-                // Continue even if marking inactive fails
-                console.log(`⚠️  Warning: Could not mark ${symbol} as inactive: ${markError.message}`);
-            }
-            
-            // Don't save problematic data to the main database
-            return { 
-                symbol, 
-                success: false, 
-                error: data.metadata.error || 'Validation warnings detected - marked as inactive',
-                errorType: 'SCHEMA_VALIDATION'
-            };
-        }
-        
-        if (shouldMarkDelisted) {
-            // Mark as delisted/inactive in validation database
-            try {
-                await database.markTickerInactive(symbol, 'DELISTED');
-                console.log(`🗑️  Marked ${symbol} as delisted due to: ${data.metadata.error}`);
-            } catch (markError) {
-                console.log(`⚠️  Warning: Could not mark ${symbol} as delisted: ${markError.message}`);
-            }
-            
-            // Don't save delisted ticker data to the main database
-            return { 
-                symbol, 
-                success: false, 
-                error: data.metadata.error,
-                errorType: 'DELISTED',
-                markedAsDelisted: true
-            };
-        }
-        
-        // Check if we got valid data (quote, historical, or summary should contain actual data)
-        const hasValidData = data.quote || (data.historical && data.historical.length > 0) || data.summary;
-        
-        if (!hasValidData && data.metadata.error) {
-            // Data fetch failed - don't update timestamp, just return error
-            return { symbol, success: false, error: data.metadata.error };
-        }
-        
-        // Only save to database and update timestamp if we have valid data
-        if (hasValidData) {
-            await database.insertOrUpdateTicker(symbol, data);
-            return { symbol, success: true, data };
-        } else {
-            // No valid data but no explicit error - treat as temporary failure
-            return { symbol, success: false, error: 'No valid data returned - undefined response' };
-        }
-        
-    } catch (error) {
-        return { symbol, success: false, error: error.message };
+// Ticker data processing functions
+class TickerDataProcessor {
+    constructor() {
+        this.database = new TickerDataDatabase();
+        this.concurrency = 3;
+        this.retryDelay = 2000; // 2 seconds
+        this.maxRetries = 3;
+        this.processingStats = {
+            total: 0,
+            successful: 0,
+            failed: 0,
+            skipped: 0,
+            inactiveMarked: 0
+        };
     }
-}
 
-async function loadActiveTickers() {
-    try {
-        // Load active tickers directly from the database
-        const validationDbPath = path.join(__dirname, '..', 'db', 'tickers.db');
-        const db = new Database(validationDbPath);
+    async initialize() {
+        await this.database.initializeDatabase();
+    }
+
+    async getActiveTickers() {
+        const result = await this.database.dbManager.query(`
+            SELECT CONCAT(symbol, '.', exchange) as ticker, symbol, exchange
+            FROM tickers 
+            WHERE active = true
+            ORDER BY last_updated ASC NULLS FIRST
+        `);
         
-        return new Promise((resolve, reject) => {
-            const query = 'SELECT ticker FROM tickers WHERE active = 1 ORDER BY ticker';
+        return result.rows;
+    }
+
+    async getUnvalidatedTickers() {
+        const result = await this.database.dbManager.query(`
+            SELECT symbol, exchanges
+            FROM tickers 
+            WHERE active IS NULL
+            ORDER BY symbol
+            LIMIT 1000
+        `);
+        
+        // Convert to the expected format that includes individual exchange combinations
+        const tickers = [];
+        for (const row of result.rows) {
+            for (const exchange of row.exchanges) {
+                tickers.push({
+                    ticker: `${row.symbol}.${exchange}`,
+                    symbol: row.symbol,
+                    exchange: exchange
+                });
+            }
+        }
+        
+        return tickers;
+    }
+
+    async getTickersNeedingUpdate(hoursThreshold = 24) {
+        const result = await this.database.dbManager.query(`
+            SELECT t.symbol, t.exchanges
+            FROM tickers t
+            WHERE (t.active = true OR t.active IS NULL)
+                AND (t.last_updated IS NULL OR t.last_updated < NOW() - INTERVAL '${hoursThreshold} hours')
+            ORDER BY t.last_updated ASC NULLS FIRST
+            LIMIT 1000
+        `);
+        
+        // Convert to the expected format that includes individual exchange combinations
+        const tickers = [];
+        for (const row of result.rows) {
+            for (const exchange of row.exchanges) {
+                tickers.push({
+                    ticker: `${row.symbol}.${exchange}`,
+                    symbol: row.symbol,
+                    exchange: exchange
+                });
+            }
+        }
+        
+        return tickers;
+    }
+
+    async processTickersConcurrent(tickers, skipRecent = true, hoursThreshold = 24) {
+        console.log(`🚀 Starting concurrent ticker processing...`);
+        console.log(`📊 Total tickers to process: ${tickers.length}`);
+        console.log(`⚙️  Concurrency: ${this.concurrency}`);
+        console.log(`⏱️  Skip recent (${hoursThreshold}h): ${skipRecent ? 'Yes' : 'No'}`);
+        console.log('=' .repeat(50));
+
+        const startTime = Date.now();
+        this.processingStats = { total: tickers.length, successful: 0, failed: 0, skipped: 0, inactiveMarked: 0 };
+
+        // Enable error suppression during processing
+        toggleErrorSuppression(true);
+
+        // Process in batches with concurrency control
+        const batches = [];
+        for (let i = 0; i < tickers.length; i += this.concurrency) {
+            batches.push(tickers.slice(i, i + this.concurrency));
+        }
+
+        let processedCount = 0;
+        for (const [batchIndex, batch] of batches.entries()) {
+            const batchStartTime = Date.now();
             
-            db.all(query, (err, rows) => {
-                db.close();
-                
-                if (err) {
-                    reject(new Error(`Failed to load active tickers from database: ${err.message}`));
+            console.log(`\n📦 Processing batch ${batchIndex + 1}/${batches.length} (${batch.length} tickers)`);
+            
+            // Process batch concurrently
+            const batchPromises = batch.map(tickerInfo => this.processTickerWithRetry(tickerInfo, skipRecent, hoursThreshold));
+            const batchResults = await Promise.allSettled(batchPromises);
+            
+            // Process results
+            batchResults.forEach((result, index) => {
+                if (result.status === 'fulfilled') {
+                    const { status } = result.value;
+                    this.processingStats[status]++;
                 } else {
-                    const tickers = rows.map(row => row.ticker);
-                    resolve(tickers);
+                    console.error(`❌ Batch error for ${batch[index].ticker}:`, result.reason);
+                    this.processingStats.failed++;
                 }
             });
-        });
+
+            processedCount += batch.length;
+            const batchTime = Date.now() - batchStartTime;
+            const tickersPerSecond = (batch.length / batchTime * 1000).toFixed(2);
+            
+            console.log(`✅ Batch completed in ${(batchTime / 1000).toFixed(1)}s (${tickersPerSecond} tickers/sec)`);
+            this.logProgress(processedCount, startTime);
+            
+            // Brief pause between batches to be respectful to the API
+            if (batchIndex < batches.length - 1) {
+                await new Promise(resolve => setTimeout(resolve, 1000));
+            }
+        }
+
+        // Disable error suppression
+        toggleErrorSuppression(false);
+
+        const totalTime = Date.now() - startTime;
+        const overallRate = (processedCount / (totalTime / 1000)).toFixed(2);
         
-    } catch (error) {
-        throw new Error(`Failed to load active tickers: ${error.message}`);
+        console.log(`\n🎉 Processing completed!`);
+        console.log(`📊 Total: ${this.processingStats.total}, Successful: ${this.processingStats.successful}, Failed: ${this.processingStats.failed}, Skipped: ${this.processingStats.skipped}`);
+        console.log(`🔄 Marked inactive: ${this.processingStats.inactiveMarked}`);
+        console.log(`⚡ Overall rate: ${overallRate} tickers/second`);
+        console.log(`⏱️  Total time: ${(totalTime / 1000 / 60).toFixed(1)} minutes`);
+        
+        return this.processingStats;
+    }
+
+    async processTickerWithRetry(tickerInfo, skipRecent, hoursThreshold) {
+        for (let attempt = 1; attempt <= this.maxRetries; attempt++) {
+            try {
+                return await this.processTicker(tickerInfo, skipRecent, hoursThreshold);
+            } catch (error) {
+                if (attempt === this.maxRetries) {
+                    console.error(`❌ Final attempt failed for ${tickerInfo.ticker}: ${error.message}`);
+                    return { status: 'failed', ticker: tickerInfo.ticker, error: error.message };
+                }
+                
+                console.log(`⚠️  Attempt ${attempt}/${this.maxRetries} failed for ${tickerInfo.ticker}, retrying...`);
+                await new Promise(resolve => setTimeout(resolve, this.retryDelay * attempt));
+            }
+        }
+    }
+
+    async processTicker(tickerInfo, skipRecent = true, hoursThreshold = 24) {
+        try {
+            const ticker = tickerInfo.ticker;
+            
+            // Check if ticker was recently processed
+            if (skipRecent) {
+                const recentCheck = await this.database.isTickerRecentlyChecked(ticker, hoursThreshold);
+                if (recentCheck.isRecent) {
+                    return { status: 'skipped', ticker, reason: `Updated ${recentCheck.hoursSince}h ago` };
+                }
+            }
+
+            // Get ticker data from Yahoo Finance (use just the symbol part)
+            const symbolOnly = ticker.includes('.') ? ticker.split('.')[0] : ticker;
+            const tickerData = await getTickerData(symbolOnly);
+            
+            // Check if data retrieval was successful
+            if (tickerData.metadata.error) {
+                // Mark ticker as inactive if there was an error
+                await this.database.markTickerInactive(ticker, tickerData.metadata.errorMessage);
+                return { status: 'inactiveMarked', ticker, reason: tickerData.metadata.errorMessage };
+            }
+            
+            // Store raw JSON in database
+            await this.database.insertOrUpdateTicker(ticker, tickerData);
+            
+            // Store structured data in normalized tables
+            console.log(`📊 Processing structured data for ${ticker}...`);
+            await this.database.dbManager.processTickerData({
+                ticker: ticker,
+                data: tickerData
+            });
+            
+            // Mark ticker as active with current price
+            const currentPrice = tickerData.quote?.regularMarketPrice || 
+                                tickerData.quote?.ask || 
+                                tickerData.quote?.bid || 
+                                tickerData.quote?.price || 0;
+            await this.database.markTickerActive(ticker, currentPrice);
+            
+            return { status: 'successful', ticker };
+            
+        } catch (error) {
+            console.error(`❌ Error processing ${tickerInfo.ticker}: ${error.message}`);
+            throw error;
+        }
+    }
+
+    logProgress(processedCount, startTime) {
+        const elapsedTime = Date.now() - startTime;
+        const remainingTickers = this.processingStats.total - processedCount;
+        const overallRate = processedCount / (elapsedTime / 1000);
+        
+        if (remainingTickers > 0 && overallRate > 0) {
+            const eta = this.calculateETA(remainingTickers, overallRate);
+            console.log(`⏱️  Progress: ${processedCount}/${this.processingStats.total} (${(processedCount/this.processingStats.total*100).toFixed(1)}%) - ETA: ${eta}`);
+        }
+        
+        console.log(`📈 Success: ${this.processingStats.successful}, Failed: ${this.processingStats.failed}, Skipped: ${this.processingStats.skipped}, Inactive: ${this.processingStats.inactiveMarked}`);
+    }
+
+    calculateETA(remainingTickers, tickersPerSecond) {
+        if (tickersPerSecond === 0) return 'Unknown';
+        
+        const remainingSeconds = remainingTickers / tickersPerSecond;
+        const hours = Math.floor(remainingSeconds / 3600);
+        const minutes = Math.floor((remainingSeconds % 3600) / 60);
+        
+        if (hours > 0) {
+            return `${hours}h ${minutes}m`;
+        } else {
+            return `${minutes}m`;
+        }
+    }
+
+    async close() {
+        await this.database.close();
     }
 }
 
-// Process all active tickers with batch processing and session management
-async function processAllActiveTickers() {
-    console.log('🚀 Processing all active tickers with comprehensive data...');
-    
-    const database = new TickerDataDatabase();
-    
-    try {
-        // Enable error suppression for cleaner output
-        toggleErrorSuppression(true);
+// Main execution function
+async function main() {
+    if (require.main === module) {
+        const processor = new TickerDataProcessor();
         
-        // Load active tickers from the database
-        const activeTickers = await loadActiveTickers();
-        console.log(`📊 Found ${activeTickers.length} active tickers to process`);
-        
-        if (activeTickers.length === 0) {
-            console.log('❌ No active tickers found to process');
-            await database.close();
-            return [];
+        // Check for help flag
+        const args = process.argv.slice(2);
+        if (args.includes('--help') || args.includes('-h')) {
+            console.log('📊 Ticker Data Processor - PostgreSQL Edition');
+            console.log('=' .repeat(50));
+            console.log('Fetches and stores comprehensive ticker data from Yahoo Finance');
+            console.log('');
+            console.log('Usage: node return-data.js [options]');
+            console.log('');
+            console.log('Options:');
+            console.log('  --all           Process all active tickers (ignores time limits)');
+            console.log('  --fresh         Force fresh data fetch (ignore recent data)');
+            console.log('  --validate      Process unvalidated tickers to determine if they are active');
+            console.log('  --unvalidated   Same as --validate');
+            console.log('  --hours=N       Only process tickers older than N hours (default: 24)');
+            console.log('  --help, -h      Show this help message');
+            console.log('');
+            console.log('Examples:');
+            console.log('  node return-data.js                    # Update tickers older than 24 hours');
+            console.log('  node return-data.js --validate         # Validate unvalidated tickers');
+            console.log('  node return-data.js --all --fresh      # Force update all active tickers');
+            console.log('  node return-data.js --hours=6          # Update tickers older than 6 hours');
+            console.log('');
+            console.log('Note: Use --validate to process generated ticker combinations and');
+            console.log('      determine which ones represent real, active stocks.');
+            return;
         }
         
-        const results = [];
-        const errors = [];
-        const schemaErrors = [];
-        const delistedTickers = [];
-        let processed = 0;
-        let requestCount = 0;
-        let skipped = 0;
-        
-        console.log('⚡ Starting batch processing...\n');
-        
-        const startTime = Date.now();
-        
-        // Process tickers in batches of 500
-        const batchSize = 100;
-        
-        // Force refresh cookies/crumbs every 10,000 requests
-        const refreshInterval = 10000;
-        
-        // Enable concurrent processing (similar to validate script)
-        const concurrentRequests = 1; // Conservative for comprehensive data
-        
-        // Function to force refresh cookies/crumbs
-        async function refreshSession() {
-            try {
-                console.log('🔄 Refreshing cookies and crumbs for rate limit prevention...');
-                // Force a simple quote to refresh session
-                await yahooFinance.quote('AAPL', {}, { validateResult: false });
-                console.log('✅ Session refreshed successfully');
-                await new Promise(resolve => setTimeout(resolve, 2000)); // 2 second pause after refresh
-            } catch (error) {
-                console.log('⚠️  Session refresh warning (continuing anyway):', error.message);
-            }
-        }
-        
-        for (let i = 0; i < activeTickers.length; i += batchSize) {
-            const batch = activeTickers.slice(i, i + batchSize);
-            const batchNumber = Math.floor(i / batchSize) + 1;
-            const totalBatches = Math.ceil(activeTickers.length / batchSize);
+        try {
+            console.log('📊 Ticker Data Processor - PostgreSQL Edition');
+            console.log('=' .repeat(50));
             
-            console.log(`\n📦 Processing batch ${batchNumber}/${totalBatches}: ${batch.length} tickers (${i + 1}-${Math.min(i + batchSize, activeTickers.length)})`);
+            await processor.initialize();
             
-            // Check if we need to refresh session before this batch
-            if (requestCount > 0 && requestCount % refreshInterval === 0) {
-                await refreshSession();
+            // Get command line arguments
+            const args = process.argv.slice(2);
+            const allFlag = args.includes('--all');
+            const freshFlag = args.includes('--fresh');
+            const validateFlag = args.includes('--validate');
+            const unvalidatedFlag = args.includes('--unvalidated');
+            const hoursArg = args.find(arg => arg.startsWith('--hours='));
+            const hours = hoursArg ? parseInt(hoursArg.split('=')[1]) : 24;
+            
+            console.log('📊 Getting database statistics...');
+            const stats = await processor.database.dbManager.getStats();
+            const tickerDataCount = await processor.database.getTickerCount();
+            const unvalidatedCount = await processor.getUnvalidatedTickers();
+            
+            console.log(`📈 Tickers: ${stats.total} (Active: ${stats.active_count}, Inactive: ${stats.inactive_count}, Unvalidated: ${unvalidatedCount.length})`);
+            console.log(`💾 Stored ticker data: ${tickerDataCount} records`);
+            
+            // Get tickers to process based on flags
+            let tickersToProcess;
+            if (validateFlag || unvalidatedFlag) {
+                console.log('🔍 Getting unvalidated tickers for validation...');
+                tickersToProcess = await processor.getUnvalidatedTickers();
+            } else if (allFlag) {
+                console.log('🔍 Getting ALL active tickers...');
+                tickersToProcess = await processor.getActiveTickers();
+            } else {
+                console.log(`🔍 Getting tickers needing update (older than ${hours} hours)...`);
+                tickersToProcess = await processor.getTickersNeedingUpdate(hours);
             }
             
-            // Track tickers that need updates vs those that are recent
-            let batchNeedsUpdate = [];
-            let batchRecentlyUpdated = [];
-            
-            // First pass: Check which tickers need updates (batch operation for efficiency)
-            for (const symbol of batch) {
-                const recentCheck = await database.isTickerRecentlyChecked(symbol, 24);
-                if (recentCheck.isRecent) {
-                    batchRecentlyUpdated.push({ symbol, hoursSince: recentCheck.hoursSince });
-                } else {
-                    batchNeedsUpdate.push(symbol);
-                }
-            }
-            
-            skipped += batchRecentlyUpdated.length;
-            
-            console.log(`   📊 Batch ${batchNumber}: ${batchNeedsUpdate.length} need updates, ${batchRecentlyUpdated.length} recently updated (skipping)`);
-            
-            if (batchRecentlyUpdated.length > 0) {
-                // Show some examples of skipped tickers
-                const examples = batchRecentlyUpdated.slice(0, 3).map(t => `${t.symbol}(${t.hoursSince}h)`).join(', ');
-                console.log(`   ⏭️  Skipped examples: ${examples}${batchRecentlyUpdated.length > 3 ? ` +${batchRecentlyUpdated.length - 3} more` : ''}`);
-            }
-            
-            // Process only tickers that need updates with concurrent processing
-            const processTickersConcurrent = async (tickersToProcess) => {
-                const chunkSize = concurrentRequests;
-                const chunks = [];
-                for (let j = 0; j < tickersToProcess.length; j += chunkSize) {
-                    chunks.push(tickersToProcess.slice(j, j + chunkSize));
-                }
+            if (tickersToProcess.length === 0) {
+                console.log('✅ No tickers need data processing at this time!');
                 
-                for (const chunk of chunks) {
-                    // Process chunk concurrently
-                    const promises = chunk.map(async (symbol) => {
-                        try {
-                            const result = await saveTickerDataToDB(symbol, database);
-                            requestCount++;
-                            
-                            if (result.success) {
-                                results.push(result);
-                                console.log(`   ✅ ${symbol}: Updated successfully`);
-                                return { symbol, success: true };
-                            } else {
-                                if (result.errorType === 'SCHEMA_VALIDATION') {
-                                    schemaErrors.push({ symbol, error: result.error || 'Schema validation error' });
-                                    console.log(`   🔄 ${symbol}: Marked inactive (schema error)`);
-                                } else if (result.errorType === 'DELISTED') {
-                                    delistedTickers.push({ symbol, error: result.error || 'Delisted ticker' });
-                                    console.log(`   🗑️  ${symbol}: Marked as delisted`);
-                                } else {
-                                    errors.push({ symbol, error: result.error || 'Unknown error' });
-                                    // Different message for undefined vs other errors
-                                    if (result.error && result.error.includes('undefined response')) {
-                                        console.log(`   ⏸️  ${symbol}: No data returned (timestamp not updated)`);
-                                    } else {
-                                        console.log(`   ❌ ${symbol}: ${result.error}`);
-                                    }
-                                }
-                                return { symbol, success: false };
-                            }
-                        } catch (error) {
-                            errors.push({ symbol, error: error.message });
-                            console.log(`   ❌ ${symbol}: ${error.message}`);
-                            requestCount++;
-                            return { symbol, success: false };
-                        }
-                    });
-                    
-                    // Wait for chunk to complete
-                    await Promise.allSettled(promises);
-                    
-                    // Shorter delay between chunks (instead of 2 seconds per ticker)
-                    if (chunks.indexOf(chunk) < chunks.length - 1) {
-                        await new Promise(resolve => setTimeout(resolve, 500)); // 500ms between chunks
+                // If no active tickers found, suggest validating unvalidated ones
+                if (!validateFlag && !unvalidatedFlag) {
+                    const unvalidatedTickers = await processor.getUnvalidatedTickers();
+                    if (unvalidatedTickers.length > 0) {
+                        console.log(`💡 Tip: Found ${unvalidatedTickers.length} unvalidated tickers. Run with --validate to process them.`);
                     }
                 }
-            };
-            
-            if (batchNeedsUpdate.length > 0) {
-                await processTickersConcurrent(batchNeedsUpdate);
+            } else {
+                console.log(`📋 Found ${tickersToProcess.length} tickers needing data processing`);
+                
+                // Process the tickers
+                const skipRecent = !freshFlag;
+                await processor.processTickersConcurrent(tickersToProcess, skipRecent, hours);
+                
+                // Final statistics
+                console.log('\n📊 Final statistics...');
+                const finalTickerDataCount = await processor.database.getTickerCount();
+                console.log(`💾 Final ticker data count: ${finalTickerDataCount} records (+${finalTickerDataCount - tickerDataCount})`);
             }
             
-            processed += batchNeedsUpdate.length;
-            
-            // Update processed count to include skipped items for accurate progress tracking
-            processed += batchRecentlyUpdated.length;
-            
-            // Show batch completion and overall progress with speed metrics
-            const currentTime = Date.now();
-            const elapsedTime = currentTime - startTime;
-            const percentage = ((processed / activeTickers.length) * 100).toFixed(1);
-            const dbCount = await database.getTickerCount();
-            const tickersPerSecond = requestCount > 0 ? Math.round((requestCount / (elapsedTime / 1000)) * 10) / 10 : 0;
-            
-            console.log(`   ✅ Batch ${batchNumber} complete! Overall: ${processed}/${activeTickers.length} (${percentage}%) - DB: ${dbCount} records - Requests: ${requestCount} - Speed: ${tickersPerSecond}/sec`);
-            
-            // Shorter delay between batches (2 seconds instead of 10)
-            if (i + batchSize < activeTickers.length) {
-                console.log(`   ⏸️  Pausing 2s before next batch...`);
-                await new Promise(resolve => setTimeout(resolve, 2000));
-            }
+        } catch (error) {
+            console.error('❌ Application error:', error);
+        } finally {
+            await processor.close();
         }
-        
-        // Get final database statistics
-        const finalDbCount = await database.getTickerCount();
-        const recentUpdates = await database.getRecentlyUpdated(5);
-        
-        // Summary
-        console.log('\n🎉 Processing completed!');
-        console.log(`📊 Total tickers processed: ${processed}/${activeTickers.length}`);
-        console.log(`✅ Successfully processed: ${results.length} tickers`);
-        console.log(`⏭️  Skipped (recently updated): ${skipped} tickers`);
-        console.log(`❌ Failed to process: ${errors.length} tickers`);
-        console.log(`🔄 Schema errors (marked inactive): ${schemaErrors.length} tickers`);
-        console.log(`🗑️  Delisted tickers (marked inactive): ${delistedTickers.length} tickers`);
-        console.log(`🌐 Total API requests made: ${requestCount}`);
-        console.log(`💾 Total records in database: ${finalDbCount}`);
-        
-        const totalProcessed = results.length + errors.length + schemaErrors.length + delistedTickers.length;
-        const successRate = totalProcessed > 0 ? ((results.length / totalProcessed) * 100).toFixed(1) : '0.0';
-        const efficiencyRate = ((totalProcessed / activeTickers.length) * 100).toFixed(1);
-        console.log(`� Success rate: ${successRate}% (of actually processed)`);
-        console.log(`⚡ Efficiency rate: ${efficiencyRate}% (avoided ${skipped} unnecessary requests)`);
-        
-        // Show refresh statistics
-        const refreshCount = Math.floor(requestCount / refreshInterval);
-        if (refreshCount > 0) {
-            console.log(`🔄 Session refreshes performed: ${refreshCount} (every ${refreshInterval.toLocaleString()} requests)`);
-        }
-        
-        console.log('\n📝 Recently updated tickers:');
-        recentUpdates.forEach(ticker => {
-            console.log(`   ${ticker.ticker} - ${ticker.last_updated}`);
-        });
-        
-        if (errors.length > 0) {
-            console.log('\n📋 Failed tickers (first 20):');
-            errors.slice(0, 20).forEach(error => {
-                console.log(`   ${error.symbol}: ${error.error}`);
-            });
-            if (errors.length > 20) {
-                console.log(`   ... and ${errors.length - 20} more`);
-            }
-        }
-        
-        if (schemaErrors.length > 0) {
-            console.log('\n🔄 Schema errors - marked as inactive (first 10):');
-            schemaErrors.slice(0, 10).forEach(error => {
-                console.log(`   ${error.symbol}: ${error.error}`);
-            });
-            if (schemaErrors.length > 10) {
-                console.log(`   ... and ${schemaErrors.length - 10} more`);
-            }
-        }
-        
-        if (delistedTickers.length > 0) {
-            console.log('\n🗑️  Delisted tickers - marked as inactive (first 10):');
-            delistedTickers.slice(0, 10).forEach(error => {
-                console.log(`   ${error.symbol}: ${error.error}`);
-            });
-            if (delistedTickers.length > 10) {
-                console.log(`   ... and ${delistedTickers.length - 10} more`);
-            }
-        }
-        
-        // Create a summary file
-        const summaryData = {
-            processedDate: new Date().toISOString(),
-            totalTickers: activeTickers.length,
-            successfullyProcessed: results.length,
-            skipped: skipped,
-            failed: errors.length,
-            schemaErrors: schemaErrors.length,
-            delistedTickers: delistedTickers.length,
-            totalApiRequests: requestCount,
-            sessionRefreshes: refreshCount,
-            successRate: `${successRate}%`,
-            efficiencyRate: `${efficiencyRate}%`,
-            databaseRecords: finalDbCount,
-            databasePath: path.join(__dirname, '..', 'db', 'ticker_data.db'),
-            recentUpdates: recentUpdates,
-            errors: errors.slice(0, 100), // Limit errors in summary to first 100
-            schemaErrorTickers: schemaErrors.slice(0, 50), // Limit schema errors to first 50
-            delistedTickersList: delistedTickers.slice(0, 50) // Limit delisted tickers to first 50
-        };
-        
-        const outputDir = path.join(__dirname, '..', '..', 'output');
-        if (!fs.existsSync(outputDir)) {
-            fs.mkdirSync(outputDir, { recursive: true });
-        }
-        const summaryPath = path.join(outputDir, 'Return-Data-Summary.json');
-        fs.writeFileSync(summaryPath, JSON.stringify(summaryData, null, 2));
-        
-        console.log(`\n📄 Processing summary saved to: ${summaryPath}`);
-        console.log(`💾 Database location: ${path.join(__dirname, '..', 'db', 'ticker_data.db')}`);
-        
-        // Restore error logging
-        toggleErrorSuppression(false);
-        
-        await database.close();
-        return results;
-        
-    } catch (error) {
-        console.error('❌ Error processing active tickers:', error.message);
-        toggleErrorSuppression(false);
-        await database.close();
-        return [];
     }
 }
 
-// Run the processing
-if (require.main === module) {
-    processAllActiveTickers();
-}
+// Export the classes and functions
+module.exports = {
+    TickerDataDatabase,
+    TickerDataProcessor,
+    getTickerData,
+    setCurrentProcessingTicker,
+    getCurrentProcessingTicker,
+    hasValidationWarning,
+    toggleErrorSuppression
+};
+
+// Run main if this is the main module
+main();

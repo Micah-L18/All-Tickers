@@ -118,6 +118,9 @@
                                 <button class="btn btn-warning command-btn" data-command="export" onclick="runCommand('export')">
                                     <i class="fas fa-file-export"></i> Export Data
                                 </button>
+                                <button class="btn btn-outline-warning command-btn" onclick="showSQLiteExportModal()">
+                                    <i class="fas fa-database"></i> Export SQLite
+                                </button>
                             </div>
                             <div class="col-md-6">
                                 <h6>Maintenance</h6>
@@ -328,6 +331,75 @@
                 <div class="modal-footer">
                     <button type="button" class="btn btn-danger" id="kill-process-btn" onclick="confirmKillProcess()">
                         <i class="fas fa-stop"></i> Stop Process
+                    </button>
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- SQLite Export Modal -->
+    <div class="modal fade" id="sqliteExportModal" tabindex="-1" aria-labelledby="sqliteExportModalLabel" aria-hidden="true">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="sqliteExportModalLabel">
+                        <i class="fas fa-database text-warning"></i> Export to SQLite Database
+                    </h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <form id="sqliteExportForm">
+                        <div class="mb-3">
+                            <label for="sqlite-filename" class="form-label">Database Filename</label>
+                            <div class="input-group">
+                                <input type="text" class="form-control" id="sqlite-filename" 
+                                       placeholder="Enter filename" value="all-tickers-export" required>
+                                <span class="input-group-text">.db</span>
+                            </div>
+                            <div class="form-text">File will be saved to the db/ folder</div>
+                        </div>
+                        
+                        <div class="mb-3">
+                            <label class="form-label">Export Options</label>
+                            <div class="form-check">
+                                <input class="form-check-input" type="checkbox" id="include-ticker-data" checked>
+                                <label class="form-check-label" for="include-ticker-data">
+                                    Include Ticker Data (JSON)
+                                </label>
+                            </div>
+                            <div class="form-check">
+                                <input class="form-check-input" type="checkbox" id="include-historical" checked>
+                                <label class="form-check-label" for="include-historical">
+                                    Include Historical Data
+                                </label>
+                            </div>
+                        </div>
+                        
+                        <div class="mb-3" id="historical-limit-section">
+                            <label for="historical-limit" class="form-label">Historical Records Limit</label>
+                            <input type="number" class="form-control" id="historical-limit" 
+                                   value="100000" min="1000" max="1000000">
+                            <div class="form-text">Limit historical records to avoid huge files (default: 100,000)</div>
+                        </div>
+                    </form>
+                    
+                    <div id="export-progress" class="mt-3" style="display: none;">
+                        <div class="d-flex align-items-center">
+                            <div class="spinner-border spinner-border-sm me-2" role="status">
+                                <span class="visually-hidden">Loading...</span>
+                            </div>
+                            <span>Exporting database...</span>
+                        </div>
+                    </div>
+                    
+                    <div id="export-result" class="mt-3" style="display: none;">
+                        <!-- Export results will be shown here -->
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-warning" id="start-export-btn" onclick="startSQLiteExport()">
+                        <i class="fas fa-database"></i> Start Export
                     </button>
                     <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
                 </div>

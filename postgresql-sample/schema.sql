@@ -281,12 +281,12 @@ CREATE OR REPLACE FUNCTION upsert_historical_data(
 )
 RETURNS void AS $$
 DECLARE
-    ticker_id INTEGER;
+    v_ticker_id INTEGER;
 BEGIN
-    ticker_id := get_or_create_ticker_id(p_symbol, p_exchange);
+    v_ticker_id := get_or_create_ticker_id(p_symbol, p_exchange);
     
     INSERT INTO ticker_historical (ticker_id, trade_date, open_price, high_price, low_price, close_price, adj_close_price, volume)
-    VALUES (ticker_id, p_trade_date, p_open, p_high, p_low, p_close, p_adj_close, p_volume)
+    VALUES (v_ticker_id, p_trade_date, p_open, p_high, p_low, p_close, p_adj_close, p_volume)
     ON CONFLICT (ticker_id, trade_date) 
     DO UPDATE SET
         open_price = EXCLUDED.open_price,
@@ -303,16 +303,31 @@ CREATE OR REPLACE FUNCTION get_latest_historical_date(p_symbol VARCHAR, p_exchan
 RETURNS DATE AS $$
 DECLARE
     latest_date DATE;
-    ticker_id INTEGER;
+    v_ticker_id INTEGER;
 BEGIN
-    SELECT id INTO ticker_id FROM tickers WHERE symbol = p_symbol AND exchange = p_exchange;
+    SELECT id INTO v_ticker_id FROM tickers WHERE symbol = p_symbol AND exchange = p_exchange;
     
-    IF ticker_id IS NULL THEN
+    IF v_ticker_id IS NULL THEN
         RETURN NULL;
     END IF;
     
-    SELECT MAX(trade_date) INTO latest_date FROM ticker_historical WHERE ticker_id = ticker_id;
+    SELECT MAX(trade_date) INTO latest_date FROM ticker_historical WHERE ticker_id = v_ticker_id;
     
     RETURN latest_date;
 END;
 $$ LANGUAGE plpgsql;
+
+-- Table for storing raw JSON data from Yahoo Finance (used by return-data system)
+CREATE TABLE ticker_data (
+    ticker VARCHAR(20) PRIMARY KEY,
+    last_updated TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    json_data JSONB NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Index for performance on ticker_data lookups
+CREATE INDEX idx_ticker_data_last_updated ON ticker_data(last_updated);
+CREATE INDEX idx_ticker_data_ticker ON ticker_data(ticker);
+
+-- GIN index for JSONB data searching
+CREATE INDEX idx_ticker_data_json ON ticker_data USING GIN (json_data);

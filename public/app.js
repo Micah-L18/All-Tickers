@@ -134,6 +134,26 @@ async function loadSystemStatus() {
                         </div>
                     </div>
                 </div>
+                <div class="row mt-3">
+                    <div class="col-md-3">
+                        <div class="text-center">
+                            <h4 class="text-info">${data.stats.database_size || 'Unknown'}</h4>
+                            <small><i class="fas fa-database"></i> Database Size</small>
+                        </div>
+                    </div>
+                    <div class="col-md-3">
+                        <div class="text-center">
+                            <h4 class="text-secondary">${(data.stats.historical_count || 0).toLocaleString()}</h4>
+                            <small><i class="fas fa-chart-line"></i> Tickers with History</small>
+                        </div>
+                    </div>
+                    <div class="col-md-6">
+                        <div class="text-center">
+                            <h4 class="text-primary">${(data.stats.total_historical_records || 0).toLocaleString()}</h4>
+                            <small><i class="fas fa-history"></i> Total Historical Records</small>
+                        </div>
+                    </div>
+                </div>
                 ${data.recentActivity && data.recentActivity.length > 0 ? `
                 <hr>
                 <h6>Recent Activity</h6>
@@ -294,7 +314,7 @@ function displayTickers(data) {
                     </span>
                 </td>
                 <td>${ticker.price && ticker.price !== -1 ? `$${ticker.price}` : 'N/A'}</td>
-                <td>${ticker.exchange && ticker.exchange !== 'NOT_FOUND' ? ticker.exchange : 'N/A'}</td>
+                <td>${ticker.exchanges && ticker.exchanges.length > 0 ? ticker.exchanges.join(', ') : 'N/A'}</td>
                 <td>${ticker.last_checked ? formatTimeAgo(ticker.last_checked) : 'Never'}</td>
                 <td>
                     <button class="btn btn-sm btn-outline-primary" 
@@ -343,7 +363,7 @@ function displayErrors(data) {
                     </span>
                 </td>
                 <td>${error.price && error.price !== -1 ? `$${error.price}` : 'N/A'}</td>
-                <td>${error.exchange && error.exchange !== 'NOT_FOUND' ? error.exchange : 'N/A'}</td>
+                <td>${error.exchanges && error.exchanges.length > 0 ? error.exchanges.join(', ') : 'N/A'}</td>
                 <td>${error.last_checked ? formatTimeAgo(error.last_checked) : 'Never'}</td>
                 <td>
                     <button class="btn btn-sm btn-outline-warning" 
@@ -489,7 +509,8 @@ async function runCommand(command) {
                     }
                     
                     // Check for interactive prompts
-                    if (chunk.includes('Do you want to regenerate all tickers?') || 
+                    if (chunk.includes('Do you want to regenerate all ticker combinations?') || 
+                        chunk.includes('Do you want to regenerate all tickers?') ||
                         chunk.includes('This command requires user input')) {
                         document.getElementById('interactive-input').style.display = 'block';
                         document.getElementById('command-input').focus();
@@ -837,7 +858,9 @@ async function validateRowTicker(symbol, buttonElement) {
                 
                 // Update exchange
                 const exchangeCell = row.cells[3];
-                exchangeCell.textContent = result.validation.exchange;
+                exchangeCell.textContent = result.validation.exchanges && result.validation.exchanges.length > 0 
+                    ? result.validation.exchanges.join(', ') 
+                    : result.validation.exchange || 'N/A';
                 
                 // Update last checked
                 const lastCheckedCell = row.cells[4];
@@ -884,4 +907,116 @@ function showRowFeedback(buttonElement, type, iconClass) {
     // Add feedback color and icon
     buttonElement.classList.add(colorMap[type]);
     buttonElement.innerHTML = `<i class="${iconClass}"></i>`;
+}
+
+// SQLite Export functions
+function showSQLiteExportModal() {
+    const modal = new bootstrap.Modal(document.getElementById('sqliteExportModal'));
+    
+    // Reset form
+    document.getElementById('sqlite-filename').value = 'all-tickers-export';
+    document.getElementById('include-ticker-data').checked = true;
+    document.getElementById('include-historical').checked = true;
+    document.getElementById('historical-limit').value = '100000';
+    
+    // Hide progress and results
+    document.getElementById('export-progress').style.display = 'none';
+    document.getElementById('export-result').style.display = 'none';
+    
+    // Show/hide historical limit based on checkbox
+    const historicalCheckbox = document.getElementById('include-historical');
+    const limitSection = document.getElementById('historical-limit-section');
+    
+    function toggleLimitSection() {
+        limitSection.style.display = historicalCheckbox.checked ? 'block' : 'none';
+    }
+    
+    historicalCheckbox.addEventListener('change', toggleLimitSection);
+    toggleLimitSection(); // Set initial state
+    
+    modal.show();
+}
+
+async function startSQLiteExport() {
+    const filename = document.getElementById('sqlite-filename').value.trim();
+    const includeTickerData = document.getElementById('include-ticker-data').checked;
+    const includeHistorical = document.getElementById('include-historical').checked;
+    const historicalLimit = parseInt(document.getElementById('historical-limit').value) || 100000;
+    
+    if (!filename) {
+        alert('Please enter a filename');
+        return;
+    }
+    
+    // Show progress
+    document.getElementById('export-progress').style.display = 'block';
+    document.getElementById('export-result').style.display = 'none';
+    document.getElementById('start-export-btn').disabled = true;
+    
+    try {
+        const response = await fetch('/api/export-sqlite', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                filename: filename,
+                options: {
+                    includeTickerData,
+                    includeHistorical,
+                    historicalLimit
+                }
+            })
+        });
+        
+        const data = await response.json();
+        
+        // Hide progress
+        document.getElementById('export-progress').style.display = 'none';
+        
+        if (data.success) {
+            // Show success result
+            document.getElementById('export-result').innerHTML = `
+                <div class="alert alert-success">
+                    <h6><i class="fas fa-check-circle"></i> Export Successful!</h6>
+                    <p class="mb-1"><strong>File:</strong> ${data.result.filePath}</p>
+                    <p class="mb-1"><strong>Size:</strong> ${data.result.fileSizeMB} MB</p>
+                    <p class="mb-1"><strong>Tables:</strong> ${data.result.tablesExported}</p>
+                    <p class="mb-0"><strong>Records:</strong> ${data.result.totalRecords.toLocaleString()}</p>
+                    <hr>
+                    <small class="text-muted">
+                        The SQLite database has been saved to the db/ folder and is available for download.
+                    </small>
+                </div>
+            `;
+            
+            // Refresh file list to show the new export
+            loadFiles();
+        } else {
+            // Show error
+            document.getElementById('export-result').innerHTML = `
+                <div class="alert alert-danger">
+                    <h6><i class="fas fa-exclamation-triangle"></i> Export Failed</h6>
+                    <p class="mb-0">${data.error || 'Unknown error occurred'}</p>
+                </div>
+            `;
+        }
+        
+        document.getElementById('export-result').style.display = 'block';
+        
+    } catch (error) {
+        // Hide progress
+        document.getElementById('export-progress').style.display = 'none';
+        
+        // Show error
+        document.getElementById('export-result').innerHTML = `
+            <div class="alert alert-danger">
+                <h6><i class="fas fa-exclamation-triangle"></i> Export Failed</h6>
+                <p class="mb-0">Network error: ${error.message}</p>
+            </div>
+        `;
+        document.getElementById('export-result').style.display = 'block';
+    } finally {
+        document.getElementById('start-export-btn').disabled = false;
+    }
 }

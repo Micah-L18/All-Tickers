@@ -1,0 +1,464 @@
+#!/usr/bin/env node
+// Re-validate inactive tickers to check for missed active ones
+
+const sqlite3 = require('sqlite3').verbose();
+const axios = require('axios');
+const path = require('path');
+
+class InactiveTickerRevalidator {
+    constructor() {
+        this.dbPath = path.join(__dirname, '..', 'db', 'tickers.db');
+        this.db = null; // Initialize as null, create connection when needed
+        this.concurrentRequests = 10; // Lower concurrency for re-validation
+        this.batchSize = 500;
+        this.retryDelay = 500; // 500ms between batches
+        this.maxRetries = 3; // Maximum database retry attempts
+        this.busyTimeout = 30000; // 30 second busy timeout
+    }
+
+    // Create database connection with proper settings
+    createConnection() {
+        return new Promise((resolve, reject) => {
+            const db = new sqlite3.Database(this.dbPath, (err) => {
+                if (err) {
+                    reject(err);
+                } else {
+                    // Configure database for better concurrency
+                    db.configure('busyTimeout', this.busyTimeout);
+                    db.run('PRAGMA journal_mode = WAL;'); // Write-Ahead Logging for better concurrency
+                    db.run('PRAGMA synchronous = NORMAL;'); // Balance between safety and performance
+                    db.run('PRAGMA temp_store = MEMORY;'); // Use memory for temporary storage
+                    db.run('PRAGMA mmap_size = 268435456;'); // 256MB memory mapping
+                    resolve(db);
+                }
+            });
+        });
+    }
+
+    // Ensure database connection exists
+    async ensureConnection() {
+        if (!this.db) {
+            this.db = await this.createConnection();
+        }
+    }
+
+    // Get all inactive tickers from database
+    async getInactiveTickers() {
+        await this.ensureConnection();
+        return new Promise((resolve, reject) => {
+            const query = `
+                SELECT ticker 
+                FROM tickers 
+                WHERE active = 0 OR active IS NULL
+                ORDER BY ticker
+            `;
+            
+            this.db.all(query, (err, rows) => {
+                if (err) {
+                    reject(err);
+                } else {
+                    resolve(rows.map(row => row.ticker));
+                }
+            });
+        });
+    }
+
+    // Validate a single ticker using Yahoo Finance with deep validation
+    async validateTicker(ticker) {
+        try {
+            const url = `https://query1.finance.yahoo.com/v8/finance/chart/${ticker}`;
+            const response = await axios.get(url, {
+                timeout: 5000,
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                }
+            });
+
+            if (response.data && response.data.chart && response.data.chart.result && response.data.chart.result.length > 0) {
+                const result = response.data.chart.result[0];
+                const meta = result.meta;
+                
+                if (meta && meta.regularMarketPrice && meta.exchangeName) {
+                    // Ticker appears active, but let's do deeper validation to catch problematic tickers
+                    const deepValidationResult = await this.performDeepValidation(ticker);
+                    
+                    if (deepValidationResult.shouldMarkInactive) {
+                        console.log(`🗑️  ${ticker}: Deep validation failed - ${deepValidationResult.reason}`);
+                        return { 
+                            active: false, 
+                            price: -1, 
+                            exchange: 'DELISTED',
+                            reason: deepValidationResult.reason
+                        };
+                    }
+                    
+                    return {
+                        active: true,
+                        price: meta.regularMarketPrice,
+                        exchange: meta.exchangeName,
+                        symbol: meta.symbol || ticker
+                    };
+                }
+            }
+            
+            return { active: false, price: -1, exchange: 'INACTIVE' };
+            
+        } catch (error) {
+            // Check for specific delisting errors
+            const errorMessage = error.message || '';
+            if (this.isDelistingError(errorMessage)) {
+                return { 
+                    active: false, 
+                    price: -1, 
+                    exchange: 'DELISTED',
+                    reason: errorMessage
+                };
+            }
+            
+            return { active: false, price: -1, exchange: 'ERROR' };
+        }
+    }
+
+    // Check if an error message indicates a delisted/problematic ticker
+    isDelistingError(errorMessage) {
+        return errorMessage.includes('No fundamentals data found for symbol') ||
+               errorMessage.includes('1d data not available for startTime') ||
+               errorMessage.includes('Only 100 years worth of day granularity data are allowed') ||
+               errorMessage.includes('Ticker not found') ||
+               errorMessage.includes('Invalid ticker') ||
+               errorMessage.includes('Symbol not found') ||
+               errorMessage.includes('No data found for this date range');
+    }
+
+    // Perform deeper validation to catch problematic tickers
+    async performDeepValidation(ticker) {
+        try {
+            // Test if we can get historical data (this is where many problematic tickers fail)
+            const historicalUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${ticker}?range=1mo&interval=1d`;
+            const historicalResponse = await axios.get(historicalUrl, {
+                timeout: 3000,
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                }
+            });
+
+            // Test if we can get quote data
+            const quoteUrl = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${ticker}`;
+            const quoteResponse = await axios.get(quoteUrl, {
+                timeout: 3000,
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                }
+            });
+
+            // Check if the responses contain the problematic error patterns
+            const responses = [historicalResponse, quoteResponse];
+            for (const resp of responses) {
+                const responseText = JSON.stringify(resp.data);
+                if (responseText.includes('No fundamentals data found for symbol') ||
+                    responseText.includes('1d data not available for startTime')) {
+                    return {
+                        shouldMarkInactive: true,
+                        reason: 'Deep validation failed - problematic ticker detected'
+                    };
+                }
+            }
+
+            return { shouldMarkInactive: false };
+            
+        } catch (error) {
+            const errorMessage = error.message || '';
+            
+            // If we get specific delisting errors during deep validation, mark as inactive
+            if (this.isDelistingError(errorMessage)) {
+                return {
+                    shouldMarkInactive: true,
+                    reason: `Deep validation error: ${errorMessage}`
+                };
+            }
+            
+            // For other errors during deep validation, assume ticker is still active
+            // (we don't want to mark tickers inactive due to temporary network issues)
+            return { shouldMarkInactive: false };
+        }
+    }
+
+    // Validate multiple tickers concurrently
+    async validateTickersConcurrent(tickers) {
+        const promises = tickers.map(ticker => 
+            this.validateTicker(ticker).then(result => ({ ticker, ...result }))
+        );
+        
+        const results = await Promise.allSettled(promises);
+        
+        return results.map(result => {
+            if (result.status === 'fulfilled') {
+                return result.value;
+            } else {
+                return {
+                    ticker: 'UNKNOWN',
+                    active: false,
+                    price: -1,
+                    exchange: 'ERROR'
+                };
+            }
+        });
+    }
+
+    // Update database with revalidation results using retry logic
+    async updateDatabase(tickerResults) {
+        await this.ensureConnection();
+        
+        for (let attempt = 1; attempt <= this.maxRetries; attempt++) {
+            try {
+                return await this.updateDatabaseAttempt(tickerResults);
+            } catch (error) {
+                console.error(`❌ Database update attempt ${attempt} failed:`, error.message);
+                
+                if (attempt === this.maxRetries) {
+                    throw error;
+                }
+                
+                // Wait before retrying, with exponential backoff
+                const waitTime = 1000 * attempt;
+                console.log(`⏳ Waiting ${waitTime}ms before retry...`);
+                await new Promise(resolve => setTimeout(resolve, waitTime));
+                
+                // Recreate connection on retry
+                if (this.db) {
+                    this.db.close();
+                    this.db = null;
+                }
+                await this.ensureConnection();
+            }
+        }
+    }
+
+    // Single attempt at database update
+    async updateDatabaseAttempt(tickerResults) {
+        return new Promise((resolve, reject) => {
+            const query = `
+                UPDATE tickers 
+                SET active = ?, price = ?, exchange = ?, last_checked = CURRENT_TIMESTAMP
+                WHERE ticker = ?
+            `;
+            
+            let completed = 0;
+            let errors = 0;
+            let foundActive = 0;
+            
+            // Process updates individually instead of using transactions
+            // This reduces the chance of locks and makes the process more resilient
+            const processUpdate = (index) => {
+                if (index >= tickerResults.length) {
+                    resolve({ completed, errors, foundActive });
+                    return;
+                }
+                
+                const { ticker, active, price, exchange } = tickerResults[index];
+                
+                this.db.run(query, [
+                    active ? 1 : 0,
+                    price,
+                    exchange,
+                    ticker
+                ], (err) => {
+                    if (err) {
+                        errors++;
+                        console.error(`❌ Error updating ${ticker}:`, err.message);
+                    } else if (active) {
+                        foundActive++;
+                        console.log(`✅ Updated ${ticker} to ACTIVE - ${exchange} - $${price}`);
+                    }
+                    
+                    completed++;
+                    
+                    // Process next update after a small delay
+                    setTimeout(() => processUpdate(index + 1), 10);
+                });
+            };
+            
+            // Start processing
+            processUpdate(0);
+        });
+    }
+
+    // Main revalidation process
+    async revalidateInactiveTickers() {
+        console.log('🔍 Starting revalidation of inactive tickers...\n');
+
+        const startTime = Date.now();
+
+        // Get all inactive tickers
+        const inactiveTickers = await this.getInactiveTickers();
+        console.log(`📊 Found ${inactiveTickers.length.toLocaleString()} inactive tickers to revalidate\n`);
+        
+        if (inactiveTickers.length === 0) {
+            console.log('✅ No inactive tickers found to revalidate!');
+            return;
+        }
+        
+        let totalProcessed = 0;
+        let totalFoundActive = 0;
+        let totalErrors = 0;
+        let requestCount = 0; // Track total requests for refresh timing
+        
+        // Force refresh cookies/crumbs every 10,000 requests
+        const refreshInterval = 10000;
+        
+        // Function to force refresh cookies/crumbs (similar to return-data script)
+        async function refreshSession() {
+            try {
+                console.log('🔄 Refreshing cookies and crumbs for rate limit prevention...');
+                // Force a simple request to refresh session
+                const refreshUrl = 'https://query1.finance.yahoo.com/v8/finance/chart/AAPL';
+                await axios.get(refreshUrl, {
+                    timeout: 5000,
+                    headers: {
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                    }
+                });
+                console.log('✅ Session refreshed successfully');
+                await new Promise(resolve => setTimeout(resolve, 2000)); // 2 second pause after refresh
+            } catch (error) {
+                console.log('⚠️  Session refresh warning (continuing anyway):', error.message);
+            }
+        }
+        
+        // Process in batches
+        for (let i = 0; i < inactiveTickers.length; i += this.batchSize) {
+            const batch = inactiveTickers.slice(i, i + this.batchSize);
+            const batchNum = Math.floor(i / this.batchSize) + 1;
+            const totalBatches = Math.ceil(inactiveTickers.length / this.batchSize);
+            
+            console.log(`🚀 Processing batch ${batchNum}/${totalBatches} (${batch.length} tickers)...`);
+            
+            // Check if we need to refresh session before this batch
+            if (requestCount > 0 && requestCount % refreshInterval === 0) {
+                await refreshSession();
+            }
+            
+            // Process batch in smaller concurrent chunks
+            const chunkSize = this.concurrentRequests;
+            const chunks = [];
+            for (let j = 0; j < batch.length; j += chunkSize) {
+                chunks.push(batch.slice(j, j + chunkSize));
+            }
+            
+            const batchResults = [];
+            
+            for (const chunk of chunks) {
+                const chunkResults = await this.validateTickersConcurrent(chunk);
+                batchResults.push(...chunkResults);
+                
+                // Update request count
+                requestCount += chunk.length;
+                
+                // Show any newly found active tickers
+                chunkResults.forEach(({ ticker, active, price, exchange }) => {
+                    if (active) {
+                        console.log(`✨ Found previously missed ticker: ${ticker} - ${exchange} - $${price}`);
+                    }
+                });
+                
+                // Small delay between chunks
+                await new Promise(resolve => setTimeout(resolve, this.retryDelay));
+            }
+            
+            // Update database with batch results
+            try {
+                const updateResults = await this.updateDatabase(batchResults);
+                totalProcessed += updateResults.completed;
+                totalFoundActive += updateResults.foundActive;
+                totalErrors += updateResults.errors;
+                
+                console.log(`💾 Batch ${batchNum} completed: ${updateResults.foundActive} new active tickers found`);
+                console.log(`📊 Database updated: ${updateResults.completed} tickers processed`);
+                
+                // Progress update
+                const progress = ((i + batch.length) / inactiveTickers.length * 100).toFixed(1);
+                console.log(`📈 Progress: ${progress}% (${totalFoundActive} newly active tickers found so far)\n`);
+                
+            } catch (error) {
+                console.error('❌ Batch update failed after all retries:', error);
+                console.error('❌ Error details:', error.message);
+                console.log('⚠️  Continuing with next batch...');
+                totalErrors += batch.length;
+                
+                // Add extra delay after failed batch
+                await new Promise(resolve => setTimeout(resolve, 5000));
+            }
+            
+            // Longer delay between batches to be respectful to the API
+            if (i + this.batchSize < inactiveTickers.length) {
+                await new Promise(resolve => setTimeout(resolve, 1000));
+            }
+        }
+        
+        const endTime = Date.now();
+        const duration = (endTime - startTime) / 1000;
+        const refreshCount = Math.floor(requestCount / refreshInterval);
+        
+        // Final summary
+        console.log('🎉 Revalidation completed!');
+        console.log('==========================================');
+        console.log(`📊 Total tickers processed: ${totalProcessed.toLocaleString()}`);
+        console.log(`✨ Previously missed active tickers: ${totalFoundActive.toLocaleString()}`);
+        console.log(`❌ Errors: ${totalErrors.toLocaleString()}`);
+        console.log(`🌐 Total requests: ${requestCount.toLocaleString()}`);
+        console.log(`🔄 Session refreshes: ${refreshCount}`);
+        console.log(`⏱️  Duration: ${duration.toFixed(2)} seconds`);
+        
+        if (totalFoundActive > 0) {
+            console.log(`\n🎯 Success! Found ${totalFoundActive} tickers that were previously marked as inactive`);
+            console.log('💡 Consider running export scripts to update your output files');
+        } else {
+            console.log('\n✅ No previously missed active tickers found - validation was accurate!');
+        }
+    }
+
+    // Close database connection
+    close() {
+        if (this.db) {
+            this.db.close((err) => {
+                if (err) {
+                    console.error('❌ Error closing database:', err);
+                } else {
+                    console.log('✅ Database connection closed');
+                }
+            });
+        }
+    }
+}
+
+// Main execution
+async function main() {
+    const revalidator = new InactiveTickerRevalidator();
+    
+    // Graceful shutdown handler
+    const shutdown = (signal) => {
+        console.log(`\n� Received ${signal}. Gracefully shutting down...`);
+        console.log('💾 Progress has been saved to database');
+        revalidator.close();
+        process.exit(0);
+    };
+    
+    process.on('SIGINT', () => shutdown('SIGINT'));
+    process.on('SIGTERM', () => shutdown('SIGTERM'));
+    
+    try {
+        await revalidator.revalidateInactiveTickers();
+    } catch (error) {
+        console.error('� Revalidation failed:', error);
+        process.exit(1);
+    } finally {
+        revalidator.close();
+    }
+}
+
+// Run if this file is executed directly
+if (require.main === module) {
+    main();
+}
+
+module.exports = { InactiveTickerRevalidator };

@@ -1,44 +1,51 @@
-const Database = require('sqlite3').Database;
+const PostgreSQLManager = require('../db/database-manager');
 const fs = require('fs');
 const path = require('path');
+require('dotenv').config();
 
 class DataExporter {
     constructor() {
-        this.dbPath = path.join(__dirname, '..', 'db', 'ticker_data.db');
-        this.db = new Database(this.dbPath);
+        this.dbManager = new PostgreSQLManager();
         this.outputDir = path.join(__dirname, '..', '..', 'output');
     }
 
+    async initialize() {
+        await this.dbManager.connect();
+        console.log('✅ PostgreSQL connection established');
+    }
+
     async getAllTickerData() {
-        return new Promise((resolve, reject) => {
+        try {
             // First check how many records we have
-            this.db.get('SELECT COUNT(*) as count FROM ticker_data', (err, countRow) => {
-                if (err) {
-                    reject(err);
-                    return;
-                }
-                
-                const totalCount = countRow.count;
-                console.log(`📊 Found ${totalCount} records in database`);
-                
-                // If too many records, reject to force streaming approach
-                if (totalCount > 1000) {
-                    console.log('⚠️  Too many records for memory loading - will use streaming...');
-                    resolve({ useStreaming: true, totalCount });
-                    return;
-                }
-                
-                // Safe to load into memory
-                const sql = 'SELECT * FROM ticker_data ORDER BY ticker ASC';
-                this.db.all(sql, (err, rows) => {
-                    if (err) {
-                        reject(err);
-                    } else {
-                        resolve(rows);
-                    }
-                });
-            });
-        });
+            const countResult = await this.dbManager.query('SELECT COUNT(*) as count FROM ticker_data');
+            const totalCount = parseInt(countResult.rows[0].count);
+            
+            console.log(`📊 Found ${totalCount} records in PostgreSQL database`);
+            
+            if (totalCount === 0) {
+                throw new Error('❌ Database not found. Please run return-data.js first to collect data.');
+            }
+            
+            // If too many records, use streaming approach
+            if (totalCount > 1000) {
+                console.log('⚠️  Too many records for memory loading - will use streaming...');
+                return { useStreaming: true, totalCount };
+            }
+            
+            // Safe to load into memory
+            const result = await this.dbManager.query(`
+                SELECT ticker, last_updated, created_at, json_data 
+                FROM ticker_data 
+                ORDER BY ticker ASC
+            `);
+            
+            return result.rows;
+        } catch (error) {
+            if (error.message.includes('does not exist') || error.message.includes('relation')) {
+                throw new Error('❌ Database not found. Please run return-data.js first to collect data.');
+            }
+            throw error;
+        }
     }
 
     async exportToJSON() {
@@ -48,7 +55,7 @@ class DataExporter {
             const rawData = await this.getAllTickerData();
             
             // Check if we should use streaming (either too many records or special flag)
-            if (rawData.useStreaming || (Array.isArray(rawData) && rawData.length > 1000)) {
+            if (rawData.useStreaming) {
                 console.log('⚠️  Using streaming export for large dataset...');
                 return await this.exportToJSONStreamingFromDB();
             }
@@ -60,7 +67,7 @@ class DataExporter {
                 metadata: {
                     exportDate: new Date().toISOString(),
                     totalRecords: rawData.length,
-                    dataSource: 'All-Tickers Comprehensive Data Collection',
+                    dataSource: 'All-Tickers Comprehensive Data Collection (PostgreSQL)',
                     version: '2.0.0',
                     description: 'Complete financial data for active tickers including quotes, historical data, and company summaries'
                 },
@@ -72,7 +79,7 @@ class DataExporter {
                         ticker: row.ticker,
                         lastUpdated: row.last_updated,
                         createdAt: row.created_at,
-                        data: JSON.parse(row.json_data)
+                        data: row.json_data // PostgreSQL JSONB is already parsed
                     };
                 })
             };
@@ -106,15 +113,11 @@ class DataExporter {
                 fs.mkdirSync(this.outputDir, { recursive: true });
             }
             
-            console.log('🚀 Starting streaming JSON export directly from database...');
+            console.log('🚀 Starting streaming JSON export directly from PostgreSQL database...');
             
             // Get total count for progress tracking
-            const totalCount = await new Promise((resolve, reject) => {
-                this.db.get('SELECT COUNT(*) as count FROM ticker_data', (err, row) => {
-                    if (err) reject(err);
-                    else resolve(row.count);
-                });
-            });
+            const countResult = await this.dbManager.query('SELECT COUNT(*) as count FROM ticker_data');
+            const totalCount = parseInt(countResult.rows[0].count);
             
             console.log(`📊 Will export ${totalCount} records using database streaming...`);
             
@@ -150,7 +153,7 @@ class DataExporter {
             const metadata = {
                 exportDate: new Date().toISOString(),
                 totalRecords: totalCount,
-                dataSource: 'All-Tickers Comprehensive Data Collection',
+                dataSource: 'All-Tickers Comprehensive Data Collection (PostgreSQL)',
                 version: '2.0.0',
                 description: 'Complete financial data for active tickers including quotes, historical data, and company summaries'
             };
@@ -165,13 +168,14 @@ class DataExporter {
             let exportedCount = 0;
             
             for (let offset = 0; offset < totalCount; offset += chunkSize) {
-                const chunk = await new Promise((resolve, reject) => {
-                    const sql = 'SELECT * FROM ticker_data ORDER BY ticker ASC LIMIT ? OFFSET ?';
-                    this.db.all(sql, [chunkSize, offset], (err, rows) => {
-                        if (err) reject(err);
-                        else resolve(rows);
-                    });
-                });
+                const result = await this.dbManager.query(`
+                    SELECT ticker, last_updated, created_at, json_data 
+                    FROM ticker_data 
+                    ORDER BY ticker ASC 
+                    LIMIT $1 OFFSET $2
+                `, [chunkSize, offset]);
+                
+                const chunk = result.rows;
                 
                 for (let i = 0; i < chunk.length; i++) {
                     const row = chunk[i];
@@ -182,7 +186,7 @@ class DataExporter {
                             ticker: row.ticker,
                             lastUpdated: row.last_updated,
                             createdAt: row.created_at,
-                            data: JSON.parse(row.json_data)
+                            data: row.json_data // PostgreSQL JSONB is already parsed
                         };
                         
                         const jsonString = JSON.stringify(tickerData, null, 4).split('\n').join('\n    ');
@@ -190,7 +194,7 @@ class DataExporter {
                         exportedCount++;
                         
                     } catch (parseError) {
-                        console.log(`⚠️  Skipping ${row?.ticker || 'unknown'} due to JSON parse error: ${parseError.message}`);
+                        console.log(`⚠️  Skipping ${row?.ticker || 'unknown'} due to processing error: ${parseError.message}`);
                     }
                     
                     processedCount++;
@@ -571,12 +575,8 @@ class DataExporter {
             console.log('🚀 Starting streaming CSV export directly from database...');
             
             // Get total count for progress tracking
-            const totalCount = await new Promise((resolve, reject) => {
-                this.db.get('SELECT COUNT(*) as count FROM ticker_data', (err, row) => {
-                    if (err) reject(err);
-                    else resolve(row.count);
-                });
-            });
+            const countResult = await this.dbManager.query('SELECT COUNT(*) as count FROM ticker_data');
+            const totalCount = countResult.rows[0].count;
             
             console.log(`📊 Will export ${totalCount} records using database streaming...`);
             
@@ -640,19 +640,16 @@ class DataExporter {
             let exportedCount = 0;
             
             for (let offset = 0; offset < totalCount; offset += chunkSize) {
-                const chunk = await new Promise((resolve, reject) => {
-                    const sql = 'SELECT * FROM ticker_data ORDER BY ticker ASC LIMIT ? OFFSET ?';
-                    this.db.all(sql, [chunkSize, offset], (err, rows) => {
-                        if (err) reject(err);
-                        else resolve(rows);
-                    });
-                });
+                const sql = 'SELECT * FROM ticker_data ORDER BY ticker ASC LIMIT $1 OFFSET $2';
+                const result = await this.dbManager.query(sql, [chunkSize, offset]);
+                const chunk = result.rows;
                 
                 for (let i = 0; i < chunk.length; i++) {
                     const row = chunk[i];
                     
                     try {
-                        const data = JSON.parse(row.json_data);
+                        // In PostgreSQL, json_data is already a JavaScript object, no need to parse
+                        const data = row.json_data;
                         const quote = data.quote || {};
                         const summary = data.summary || {};
                         const stats = data.statistics?.historicalStats || {};
@@ -721,44 +718,29 @@ class DataExporter {
     }
 
     async getExportStats() {
-        return new Promise((resolve, reject) => {
-            const sql = `
-                SELECT 
-                    COUNT(*) as total_records,
-                    COUNT(CASE WHEN json_data LIKE '%"error"%' THEN 1 END) as error_records,
-                    COUNT(CASE WHEN json_data NOT LIKE '%"error"%' THEN 1 END) as success_records,
-                    MIN(created_at) as earliest_record,
-                    MAX(last_updated) as latest_update
-                FROM ticker_data
-            `;
-            
-            this.db.get(sql, (err, row) => {
-                if (err) {
-                    reject(err);
-                } else {
-                    resolve(row);
-                }
-            });
-        });
+        const sql = `
+            SELECT 
+                COUNT(*) as total_records,
+                COUNT(CASE WHEN json_data::text LIKE '%"error"%' THEN 1 END) as error_records,
+                COUNT(CASE WHEN json_data::text NOT LIKE '%"error"%' THEN 1 END) as success_records,
+                MIN(created_at) as earliest_record,
+                MAX(last_updated) as latest_update
+            FROM ticker_data
+        `;
+        
+        try {
+            const result = await this.dbManager.query(sql);
+            return result.rows[0];
+        } catch (error) {
+            throw error;
+        }
     }
 
-    close() {
-        return new Promise((resolve) => {
-            if (!this.db) {
-                resolve(); // Already closed
-                return;
-            }
-            
-            this.db.close((err) => {
-                if (err) {
-                    console.error('❌ Error closing database:', err);
-                } else {
-                    console.log('✅ Database connection closed');
-                }
-                this.db = null; // Mark as closed
-                resolve();
-            });
-        });
+    async close() {
+        if (this.dbManager && this.dbManager.isConnected) {
+            await this.dbManager.disconnect();
+            console.log('✅ Database connection closed');
+        }
     }
 }
 
@@ -770,11 +752,8 @@ async function exportAllData() {
     const exporter = new DataExporter();
     
     try {
-        // Check if database exists
-        if (!fs.existsSync(exporter.dbPath)) {
-            console.error('❌ Database not found. Please run return-data.js first to collect data.');
-            return;
-        }
+        // Initialize database connection
+        await exporter.initialize();
         
         // Get export statistics
         const stats = await exporter.getExportStats();
@@ -792,9 +771,9 @@ async function exportAllData() {
         
         console.log('\n🚀 Starting data export...');
         
-        // Export to both formats
-        const jsonPath = await exporter.exportToJSON();
-        const csvPath = await exporter.exportToCSV();
+        // Export to both formats using streaming methods
+        const jsonPath = await exporter.exportToJSONStreamingFromDB();
+        const csvPath = await exporter.exportToCSVStreamingFromDB();
         
         // File size information
         const jsonStats = fs.statSync(jsonPath);
