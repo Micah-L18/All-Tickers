@@ -1,40 +1,53 @@
-const PostgreSQLManager = require('../db/database-manager');
+const sqlite3 = require('sqlite3').verbose();
 const axios = require('axios');
 const path = require('path');
-require('dotenv').config();
 
 class FastTickerValidator {
     constructor() {
-        this.dbManager = new PostgreSQLManager();
+        this.dbPath = path.join(__dirname, '..', 'db', 'tickers.db');
+        this.db = null; // Initialize as null, create connection when needed
         this.batchSize = 500; // Increased batch size
         this.delayMs = 200; // Reduced delay
         this.concurrentRequests = 25; // Allow multiple concurrent requests
         this.timeoutMs = 3000; // Faster timeout
         this.maxRetries = 3; // Maximum database retry attempts
+        this.busyTimeout = 30000; // 30 second busy timeout
     }
 
-    // Initialize database connection
+    // Create database connection with proper settings
+    createConnection() {
+        return new Promise((resolve, reject) => {
+            const db = new sqlite3.Database(this.dbPath, (err) => {
+                if (err) {
+                    reject(err);
+                } else {
+                    // Configure database for better concurrency
+                    db.configure('busyTimeout', this.busyTimeout);
+                    db.run('PRAGMA journal_mode = WAL;'); // Write-Ahead Logging for better concurrency
+                    db.run('PRAGMA synchronous = NORMAL;'); // Balance between safety and performance
+                    db.run('PRAGMA temp_store = MEMORY;'); // Use memory for temporary storage
+                    db.run('PRAGMA mmap_size = 268435456;'); // 256MB memory mapping
+                    resolve(db);
+                }
+            });
+        });
+    }
+
+    // Ensure database connection exists
     async ensureConnection() {
-        if (!this.dbManager.isConnected) {
-            await this.dbManager.connect();
+        if (!this.db) {
+            this.db = await this.createConnection();
         }
     }
 
-    // Get tickers that haven't been validated yet (active = null and no price set)
+    // Get tickers that haven't been validated yet (active = false and no price set)
     async getUnvalidatedTickers(limit = null) {
         await this.ensureConnection();
-        
-        let query = 'SELECT symbol, exchange FROM tickers WHERE active IS NULL AND price IS NULL';
-        const params = [];
-        
-        if (limit) {
-            query += ' LIMIT $1';
-            params.push(limit);
-        }
-        
-        const result = await this.dbManager.query(query, params);
-        return result.rows.map(row => `${row.symbol}.${row.exchange}`);
-    }
+        return new Promise((resolve, reject) => {
+            let query = 'SELECT ticker FROM tickers WHERE active = 0 AND price IS NULL';
+            if (limit) {
+                query += ` LIMIT ${limit}`;
+            }
             
             this.db.all(query, (err, rows) => {
                 if (err) {

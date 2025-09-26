@@ -98,6 +98,17 @@ class DatabaseCleaner {
         }
     }
 
+    async vacuumDatabase() {
+        console.log('🧹 Reclaiming disk space (VACUUM FULL)...');
+        
+        try {
+            await this.dbManager.query('VACUUM FULL');
+            console.log('   ✅ Database vacuum completed - disk space reclaimed');
+        } catch (error) {
+            console.log(`   ⚠️  Vacuum failed: ${error.message}`);
+        }
+    }
+
     async getTableStats() {
         console.log('📊 Getting table statistics...');
         
@@ -247,6 +258,9 @@ async function main() {
 
         // Reset sequences
         await cleaner.resetSequences();
+
+        // Reclaim disk space
+        await cleaner.vacuumDatabase();
 
         console.log('');
         console.log('🎉 Database cleanup completed successfully!');

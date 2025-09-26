@@ -26,51 +26,51 @@ class TickerGenerator {
             tickers.push({ symbol: alphabet[i], exchanges: [...exchanges] });
         }
 
-        // // Generate 2-letter tickers (AA-ZZ)
-        // for (let i = 0; i < alphabet.length; i++) {
-        //     for (let j = 0; j < alphabet.length; j++) {
-        //         const symbol = alphabet[i] + alphabet[j];
-        //         tickers.push({ symbol, exchanges: [...exchanges] });
-        //     }
-        // }
+        // Generate 2-letter tickers (AA-ZZ)
+        for (let i = 0; i < alphabet.length; i++) {
+            for (let j = 0; j < alphabet.length; j++) {
+                const symbol = alphabet[i] + alphabet[j];
+                tickers.push({ symbol, exchanges: [...exchanges] });
+            }
+        }
 
-        // // Generate 3-letter tickers (AAA-ZZZ)
-        // for (let i = 0; i < alphabet.length; i++) {
-        //     for (let j = 0; j < alphabet.length; j++) {
-        //         for (let k = 0; k < alphabet.length; k++) {
-        //             const symbol = alphabet[i] + alphabet[j] + alphabet[k];
-        //             tickers.push({ symbol, exchanges: [...exchanges] });
-        //         }
-        //     }
-        // }
+        // Generate 3-letter tickers (AAA-ZZZ)
+        for (let i = 0; i < alphabet.length; i++) {
+            for (let j = 0; j < alphabet.length; j++) {
+                for (let k = 0; k < alphabet.length; k++) {
+                    const symbol = alphabet[i] + alphabet[j] + alphabet[k];
+                    tickers.push({ symbol, exchanges: [...exchanges] });
+                }
+            }
+        }
 
-        // // Generate 4-letter tickers (AAAA-ZZZZ)
-        // for (let i = 0; i < alphabet.length; i++) {
-        //     for (let j = 0; j < alphabet.length; j++) {
-        //         for (let k = 0; k < alphabet.length; k++) {
-        //             for (let l = 0; l < alphabet.length; l++) {
-        //                 const symbol = alphabet[i] + alphabet[j] + alphabet[k] + alphabet[l];
-        //                 tickers.push({ symbol, exchanges: [...exchanges] });
-        //             }
-        //         }
-        //     }
-        // }
+        // Generate 4-letter tickers (AAAA-ZZZZ)
+        for (let i = 0; i < alphabet.length; i++) {
+            for (let j = 0; j < alphabet.length; j++) {
+                for (let k = 0; k < alphabet.length; k++) {
+                    for (let l = 0; l < alphabet.length; l++) {
+                        const symbol = alphabet[i] + alphabet[j] + alphabet[k] + alphabet[l];
+                        tickers.push({ symbol, exchanges: [...exchanges] });
+                    }
+                }
+            }
+        }
 
-        // // Generate 5-letter tickers (AAAAA-ZZZZZ)
-        // // NOTE: This will generate a very large number of combinations
-        // // Consider running this separately or with additional filtering
-        // for (let i = 0; i < alphabet.length; i++) {
-        //     for (let j = 0; j < alphabet.length; j++) {
-        //         for (let k = 0; k < alphabet.length; k++) {
-        //             for (let l = 0; l < alphabet.length; l++) {
-        //                 for (let m = 0; m < alphabet.length; m++) {
-        //                     const symbol = alphabet[i] + alphabet[j] + alphabet[k] + alphabet[l] + alphabet[m];
-        //                     tickers.push({ symbol, exchanges: [...exchanges] });
-        //                 }
-        //             }
-        //         }
-        //     }
-        // }
+        // Generate 5-letter tickers (AAAAA-ZZZZZ)
+        // NOTE: This will generate a very large number of combinations
+        // Consider running this separately or with additional filtering
+        for (let i = 0; i < alphabet.length; i++) {
+            for (let j = 0; j < alphabet.length; j++) {
+                for (let k = 0; k < alphabet.length; k++) {
+                    for (let l = 0; l < alphabet.length; l++) {
+                        for (let m = 0; m < alphabet.length; m++) {
+                            const symbol = alphabet[i] + alphabet[j] + alphabet[k] + alphabet[l] + alphabet[m];
+                            tickers.push({ symbol, exchanges: [...exchanges] });
+                        }
+                    }
+                }
+            }
+        }
 
         return tickers;
     }
@@ -87,9 +87,7 @@ class TickerGenerator {
             
             const combinations = this.generateCombinationsOfLength(alphabet, length);
             for (const symbol of combinations) {
-                for (const exchange of exchanges) {
-                    tickers.push({ symbol, exchange });
-                }
+                tickers.push({ symbol, exchanges: [...exchanges] });
             }
         }
 
@@ -209,13 +207,13 @@ class TickerGenerator {
     async getExchangeStats() {
         const result = await this.dbManager.query(`
             SELECT 
-                exchange,
+                unnest(exchanges) as exchange_name,
                 COUNT(*) as total,
                 COUNT(CASE WHEN active = true THEN 1 END) as active_count,
                 COUNT(CASE WHEN active = false THEN 1 END) as inactive_count,
                 COUNT(CASE WHEN active IS NULL THEN 1 END) as unvalidated_count
             FROM tickers
-            GROUP BY exchange
+            GROUP BY exchange_name
             ORDER BY total DESC
         `);
         
@@ -294,7 +292,7 @@ async function main() {
             const exchangeStats = await generator.getExchangeStats();
             console.log('\n📈 Exchange breakdown:');
             for (const stat of exchangeStats) {
-                console.log(`   ${stat.exchange}: ${stat.total} total (Active: ${stat.active_count}, Inactive: ${stat.inactive_count}, Unvalidated: ${stat.unvalidated_count})`);
+                console.log(`   ${stat.exchange_name}: ${stat.total} total (Active: ${stat.active_count}, Inactive: ${stat.inactive_count}, Unvalidated: ${stat.unvalidated_count})`);
             }
             
             if (!forceFlag && !clearFlag) {
@@ -377,7 +375,7 @@ async function main() {
         
         console.log('\n📈 Final exchange breakdown:');
         for (const stat of finalExchangeStats) {
-            console.log(`   ${stat.exchange}: ${stat.total} combinations`);
+            console.log(`   ${stat.exchange_name}: ${stat.total} combinations`);
         }
         
         console.log('\n🚀 Ready for ticker validation! Run the validation scripts to begin.');

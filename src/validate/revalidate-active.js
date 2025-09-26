@@ -27,16 +27,16 @@ class ActiveTickerRevalidator {
         await this.ensureConnection();
         
         const result = await this.dbManager.query(`
-            SELECT symbol, exchange, price, last_updated as last_checked
+            SELECT symbol, exchanges, price, last_updated as last_checked
             FROM tickers 
             WHERE active = true
             ORDER BY last_updated ASC NULLS FIRST
         `);
         
         return result.rows.map(row => ({
-            ticker: `${row.symbol}.${row.exchange}`,
+            ticker: row.symbol, // Use just symbol since exchanges is an array
             price: row.price,
-            exchange: row.exchange,
+            exchanges: row.exchanges, // Keep full exchanges array
             last_checked: row.last_checked
         }));
     }
@@ -46,7 +46,7 @@ class ActiveTickerRevalidator {
         await this.ensureConnection();
         
         const result = await this.dbManager.query(`
-            SELECT symbol, exchange, price, last_updated as last_checked
+            SELECT symbol, exchanges, price, last_updated as last_checked
             FROM tickers 
             WHERE active = true 
                 AND (last_updated IS NULL OR last_updated < NOW() - INTERVAL '${daysSinceLastCheck} days')
@@ -54,9 +54,9 @@ class ActiveTickerRevalidator {
         `);
         
         return result.rows.map(row => ({
-            ticker: `${row.symbol}.${row.exchange}`,
+            ticker: row.symbol, // Use just symbol since exchanges is an array
             price: row.price,
-            exchange: row.exchange,
+            exchanges: row.exchanges, // Keep full exchanges array
             last_checked: row.last_checked
         }));
     }
@@ -102,7 +102,7 @@ class ActiveTickerRevalidator {
     // Validate an active ticker to see if it's still active
     async validateActiveTicker(tickerData) {
         try {
-            const symbol = tickerData.ticker.split('.')[0];
+            const symbol = tickerData.ticker; // ticker is now just the symbol
             
             // Use Yahoo Finance API to check if ticker is still active
             const url = `https://query1.finance.yahoo.com/v1/finance/search?q=${symbol}&lang=en-US&region=US&quotesCount=6&newsCount=4&listsCount=2&enableFuzzyQuery=false`;
@@ -119,16 +119,19 @@ class ActiveTickerRevalidator {
                 
                 // Check if the ticker still matches and is tradeable
                 if (quote.symbol.toUpperCase() === symbol.toUpperCase()) {
-                    const currentPrice = quote.regularMarketPrice || quote.ask || quote.bid || 0;
+                    const currentPrice = quote.regularMarketPrice || quote.ask || quote.bid;
                     const previousPrice = tickerData.price || 0;
+                    
+                    // Only update price if we got a valid price from API
+                    const finalPrice = currentPrice && currentPrice > 0 ? currentPrice : tickerData.price;
                     
                     return {
                         ticker: tickerData.ticker,
                         active: true,
-                        price: currentPrice,
-                        exchange: quote.exchDisp || quote.exchange || tickerData.exchange,
+                        price: finalPrice,
+                        exchange: quote.exchDisp || quote.exchange || (tickerData.exchanges && tickerData.exchanges[0]) || 'UNKNOWN',
                         status_changed: false,
-                        price_changed: Math.abs(currentPrice - previousPrice) > 0.01
+                        price_changed: currentPrice && currentPrice > 0 && Math.abs(currentPrice - previousPrice) > 0.01
                     };
                 }
             }
@@ -151,7 +154,7 @@ class ActiveTickerRevalidator {
                 ticker: tickerData.ticker,
                 active: true, // Conservative approach - keep active on API errors
                 price: tickerData.price,
-                exchange: tickerData.exchange,
+                exchange: (tickerData.exchanges && tickerData.exchanges[0]) || 'UNKNOWN',
                 status_changed: false,
                 error: error.message
             };
@@ -168,8 +171,7 @@ class ActiveTickerRevalidator {
 
         for (const result of results) {
             try {
-                const [symbol, exchange] = result.ticker.includes('.') ? 
-                    result.ticker.split('.') : [result.ticker, 'NYSE'];
+                const symbol = result.ticker; // ticker is now just the symbol
                 
                 await this.dbManager.updateTicker(symbol, {
                     active: result.active,

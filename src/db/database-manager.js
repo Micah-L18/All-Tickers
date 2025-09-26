@@ -15,13 +15,18 @@ class PostgreSQLManager {
             database: config.database || process.env.DB_NAME || 'all_tickers',
             password: config.password || process.env.DB_PASSWORD,
             port: config.port || process.env.DB_PORT || 5432,
-            // Connection pool settings
-            max: config.max || 20,
-            idleTimeoutMillis: config.idleTimeoutMillis || 30000,
-            connectionTimeoutMillis: config.connectionTimeoutMillis || 2000,
+            // Connection pool settings - extremely conservative to prevent memory exhaustion
+            max: config.max || 2, // Only 2 connections max
+            min: config.min || 1, // Minimum connections to maintain
+            idleTimeoutMillis: config.idleTimeoutMillis || 60000, // 1 minute idle timeout
+            connectionTimeoutMillis: config.connectionTimeoutMillis || 10000, // 10 second connection timeout
+            acquireTimeoutMillis: config.acquireTimeoutMillis || 15000, // 15 seconds to acquire connection
+            // Query settings - increased timeout for large export operations
+            query_timeout: config.query_timeout || 300000, // 5 minute query timeout for exports
+            statement_timeout: config.statement_timeout || 300000, // 5 minute statement timeout
             // Application settings
             retryAttempts: config.retryAttempts || 3,
-            retryDelay: config.retryDelay || 1000
+            retryDelay: config.retryDelay || 2000 // Longer delay between retries
         };
 
         this.pool = null;
@@ -46,7 +51,8 @@ class PostgreSQLManager {
             // Set up error handling
             this.pool.on('error', (err, client) => {
                 console.error('❌ Unexpected error on idle client', err);
-                process.exit(-1);
+                // Don't exit process, just log the error
+                console.error('❌ Database pool error - attempting to recover');
             });
             
             return this.pool;
@@ -60,15 +66,22 @@ class PostgreSQLManager {
      * Close all connections
      */
     async disconnect() {
-        if (this.pool) {
-            await this.pool.end();
-            this.isConnected = false;
-            console.log('✅ PostgreSQL connections closed');
+        if (this.pool && this.isConnected) {
+            try {
+                await this.pool.end();
+                this.isConnected = false;
+                this.pool = null;
+                console.log('✅ PostgreSQL connections closed');
+            } catch (error) {
+                console.error('❌ Error closing PostgreSQL connections:', error.message);
+                this.isConnected = false;
+                this.pool = null;
+            }
         }
     }
 
     /**
-     * Execute query with retry logic
+     * Execute query with enhanced retry logic for memory errors
      */
     async query(text, params = []) {
         if (!this.isConnected) {
@@ -80,14 +93,29 @@ class PostgreSQLManager {
                 const result = await this.pool.query(text, params);
                 return result;
             } catch (error) {
-                console.error(`Query attempt ${attempt} failed:`, error.message);
+                const errorMessage = error.message.toLowerCase();
+                const isMemoryError = errorMessage.includes('out of shared memory') || 
+                                    errorMessage.includes('memory') ||
+                                    errorMessage.includes('out of memory');
+                
+                console.error(`Query attempt ${attempt} failed: ${error.message}`);
                 
                 if (attempt === this.config.retryAttempts) {
                     throw error;
                 }
                 
-                // Wait before retry
-                await new Promise(resolve => setTimeout(resolve, this.config.retryDelay * attempt));
+                // For memory errors, wait longer and trigger garbage collection
+                if (isMemoryError) {
+                    if (global.gc) {
+                        global.gc();
+                    }
+                    // Exponential backoff with longer delays for memory errors
+                    const delay = this.config.retryDelay * attempt * (isMemoryError ? 3 : 1);
+                    await new Promise(resolve => setTimeout(resolve, delay));
+                } else {
+                    // Standard retry delay for other errors
+                    await new Promise(resolve => setTimeout(resolve, this.config.retryDelay * attempt));
+                }
             }
         }
     }
@@ -112,7 +140,7 @@ class PostgreSQLManager {
     /**
      * Update ticker basic info (validation data)
      */
-    async updateTicker(symbol, { active, price, exchanges } = {}) {
+    async updateTicker(symbol, { active, price, exchanges, updateValidated = false } = {}) {
         const updateFields = [];
         const values = [];
         let paramIndex = 2;
@@ -132,7 +160,13 @@ class PostgreSQLManager {
             values.push(Array.isArray(exchanges) ? exchanges : [exchanges]);
         }
 
+        // Always update last_updated when data changes
         updateFields.push(`last_updated = CURRENT_TIMESTAMP`);
+        
+        // Only update last_validated when explicitly requested (during validation operations)
+        if (updateValidated) {
+            updateFields.push(`last_validated = CURRENT_TIMESTAMP`);
+        }
 
         const query = `
             UPDATE tickers 
@@ -141,6 +175,31 @@ class PostgreSQLManager {
         `;
 
         return await this.query(query, [symbol, ...values]);
+    }
+
+    /**
+     * Trigger background stats cache refresh (throttled to avoid excessive updates)
+     */
+    triggerStatsRefreshIfNeeded() {
+        // Only refresh if enough time has passed since last trigger
+        const now = Date.now();
+        if (!this.lastStatsRefreshTrigger || (now - this.lastStatsRefreshTrigger) > 300000) { // 5 minutes
+            this.lastStatsRefreshTrigger = now;
+            
+            // Trigger in background, don't wait
+            setImmediate(async () => {
+                try {
+                    const StatsCache = require('./stats-cache');
+                    const statsCache = new StatsCache();
+                    await statsCache.initialize();
+                    await statsCache.refreshAllStats();
+                    await statsCache.close();
+                    console.log('🔄 Stats cache refreshed after ticker updates');
+                } catch (error) {
+                    console.error('❌ Background stats refresh failed:', error);
+                }
+            });
+        }
     }
 
     /**
@@ -186,27 +245,39 @@ class PostgreSQLManager {
 
         console.log(`Processing ${dataToProcess.length} historical records for ${symbol}`);
 
-        // Batch insert/update historical data using symbol-based function
-        for (const record of dataToProcess) {
+        // Batch insert/update historical data using efficient SQL batch queries
+        const batchSize = 50; // Process in smaller batches to avoid memory issues
+        
+        for (let i = 0; i < dataToProcess.length; i += batchSize) {
+            const batch = dataToProcess.slice(i, i + batchSize);
+            
             try {
-                const recordDate = new Date(record.date).toISOString().split('T')[0];
+                // Use individual queries but in a transaction for efficiency
+                for (const record of batch) {
+                    try {
+                        const recordDate = new Date(record.date).toISOString().split('T')[0];
+                        
+                        await this.query(`
+                            SELECT upsert_historical_data_by_symbol($1, $2, $3, $4, $5, $6, $7, $8)
+                        `, [
+                            symbol, recordDate, record.open, record.high,
+                            record.low, record.close, record.adjClose, record.volume
+                        ]);
+                        
+                        inserted++;
+                    } catch (recordError) {
+                        console.error(`Failed to process historical record for ${symbol}:`, recordError.message);
+                    }
+                }
                 
-                const result = await this.query(`
-                    SELECT upsert_historical_data_by_symbol($1, $2, $3, $4, $5, $6, $7, $8)
-                `, [
-                    symbol,
-                    recordDate,
-                    record.open,
-                    record.high,
-                    record.low,
-                    record.close,
-                    record.adjClose,
-                    record.volume
-                ]);
-
-                inserted++; // The function handles insert/update internally
+                // Small delay between batches to reduce memory pressure
+                if (i + batchSize < dataToProcess.length) {
+                    await new Promise(resolve => setTimeout(resolve, 10));
+                }
+                
             } catch (error) {
-                console.error(`Failed to process historical record for ${symbol}:`, error.message);
+                console.error(`Failed to process batch for ${symbol}:`, error.message);
+                // Continue with next batch
             }
         }
 
@@ -559,9 +630,86 @@ class PostgreSQLManager {
     }
 
     /**
-     * Get database statistics
+     * Get database statistics (cached version for fast retrieval)
      */
     async getStats() {
+        const StatsCache = require('./stats-cache');
+        const statsCache = new StatsCache(this); // Pass this database manager instance
+        
+        try {
+            await statsCache.initialize();
+            
+            // Check if cache needs refresh (uses 5-second logic from stats-cache.js)
+            const needsRefresh = await statsCache.needsRefresh();
+            
+            if (needsRefresh) {
+                console.log('📊 Stats cache is stale, refreshing synchronously...');
+                // Refresh synchronously to avoid connection cascade
+                await statsCache.refreshAllStats();
+                const newStats = await statsCache.getCachedStats();
+                return this.formatStatsResponse(newStats);
+            } else {
+                // Cache is fresh, use it
+                const cachedStats = await statsCache.getCachedStats();
+                return this.formatStatsResponse(cachedStats);
+            }
+        } catch (error) {
+            console.error('❌ Error with stats cache, falling back to real-time calculation:', error);
+            return this.getStatsRealtime(); // Fallback to original method
+        }
+    }
+
+    /**
+     * Handle background stats refresh without connection conflicts
+     * DISABLED to prevent connection cascade issues
+     */
+    async backgroundRefreshStats() {
+        // Disabled to prevent multiple database connections
+        console.log('📊 Background refresh disabled to prevent connection issues');
+        return;
+        
+        /*
+        const StatsCache = require('./stats-cache');
+        const backgroundStatsCache = new StatsCache(); // Create a separate instance for background work
+        
+        try {
+            await backgroundStatsCache.initialize();
+            await backgroundStatsCache.refreshAllStats();
+        } catch (error) {
+            console.error('❌ Background stats refresh failed:', error);
+        } finally {
+            try {
+                await backgroundStatsCache.close();
+            } catch (closeError) {
+                // Ignore close errors for background tasks
+            }
+        }
+        */
+    }
+
+    /**
+     * Format cached stats into expected response format
+     */
+    formatStatsResponse(cachedStats) {
+        return {
+            total: parseInt(cachedStats.total) || 0,
+            active_count: parseInt(cachedStats.active_count) || 0,
+            inactive_count: parseInt(cachedStats.inactive_count) || 0,
+            unvalidated_count: parseInt(cachedStats.unvalidated_count) || 0,
+            validated_count: parseInt(cachedStats.validated_count) || 0,
+            historical_count: parseInt(cachedStats.historical_count) || 0,
+            total_historical_records: parseInt(cachedStats.total_historical_records) || 0,
+            total_exchanges: parseInt(cachedStats.total_exchanges) || 0,
+            database_size: cachedStats.database_size || 'Unknown',
+            cache_age_minutes: cachedStats.cache_age_minutes || 0,
+            last_cache_refresh: cachedStats.last_refresh || null
+        };
+    }
+
+    /**
+     * Get database statistics (original real-time calculation - now used as fallback)
+     */
+    async getStatsRealtime() {
         const query = `
             SELECT 
                 COUNT(*) as total,
@@ -576,7 +724,45 @@ class PostgreSQLManager {
         `;
 
         const result = await this.query(query);
-        return result.rows[0];
+        const stats = result.rows[0];
+
+        // Get database size
+        try {
+            const sizeQuery = `SELECT pg_database_size(current_database()) as size_bytes`;
+            const sizeResult = await this.query(sizeQuery);
+            const sizeBytes = parseInt(sizeResult.rows[0].size_bytes);
+            stats.database_size = this.formatDatabaseSize(sizeBytes);
+        } catch (error) {
+            console.log('Could not get database size:', error.message);
+            stats.database_size = 'Unknown';
+        }
+
+        return stats;
+    }
+
+    /**
+     * Format database size with decimal scaling (1000-based)
+     */
+    formatDatabaseSize(bytes) {
+        if (bytes === 0) return '0 B';
+        
+        const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
+        const base = 1000; // Decimal scaling as requested
+        
+        const i = Math.floor(Math.log(bytes) / Math.log(base));
+        const size = bytes / Math.pow(base, i);
+        
+        // Format with appropriate decimal places
+        let formattedSize;
+        if (size >= 100) {
+            formattedSize = size.toFixed(0);
+        } else if (size >= 10) {
+            formattedSize = size.toFixed(1);
+        } else {
+            formattedSize = size.toFixed(2);
+        }
+        
+        return `${formattedSize} ${units[i]}`;
     }
 
     /**
@@ -614,6 +800,427 @@ class PostgreSQLManager {
             data: dataResult.rows,
             total: total
         };
+    }
+
+    /**
+     * Export database data to SQLite format
+     */
+    async exportToSQLite(exportPath, options = {}, progressCallback = null) {
+        const sqlite3 = require('sqlite3').verbose();
+        const fs = require('fs');
+        const path = require('path');
+
+        const progress = progressCallback || ((msg) => console.log(msg));
+        let db = null; // Initialize db variable for proper cleanup
+
+        try {
+            progress('🔄 Starting SQLite export...');
+            
+            // Ensure output directory exists
+            const outputDir = path.dirname(exportPath);
+            if (!fs.existsSync(outputDir)) {
+                fs.mkdirSync(outputDir, { recursive: true });
+                progress(`📁 Created output directory: ${outputDir}`);
+            }
+
+            // Delete existing file if it exists
+            if (fs.existsSync(exportPath)) {
+                fs.unlinkSync(exportPath);
+                progress('🗑️ Removed existing SQLite file');
+            }
+
+            // Create SQLite database
+            progress('📊 Creating SQLite database...');
+            db = new sqlite3.Database(exportPath);
+            
+            // Create tables
+            progress('🔧 Creating SQLite tables...');
+            await new Promise((resolve, reject) => {
+                db.serialize(() => {
+                    // Create tickers table
+                    db.run(`CREATE TABLE IF NOT EXISTS tickers (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        symbol TEXT UNIQUE NOT NULL,
+                        active BOOLEAN DEFAULT true,
+                        exchanges TEXT,
+                        current_price REAL,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )`);
+
+                    // Create ticker_quotes table
+                    db.run(`CREATE TABLE IF NOT EXISTS ticker_quotes (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        ticker_id INTEGER,
+                        quote_time TIMESTAMP,
+                        regular_market_price REAL,
+                        regular_market_change REAL,
+                        regular_market_change_percent REAL,
+                        regular_market_previous_close REAL,
+                        regular_market_open REAL,
+                        regular_market_day_low REAL,
+                        regular_market_day_high REAL,
+                        regular_market_volume INTEGER,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY(ticker_id) REFERENCES tickers(id)
+                    )`);
+
+                    // Create ticker_metadata table
+                    db.run(`CREATE TABLE IF NOT EXISTS ticker_metadata (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        ticker_id INTEGER,
+                        fetch_date TIMESTAMP,
+                        data_source TEXT,
+                        version TEXT,
+                        had_validation_warnings BOOLEAN,
+                        historical_start_date TIMESTAMP,
+                        historical_end_date TIMESTAMP,
+                        historical_record_count INTEGER,
+                        summary_modules_count INTEGER,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY(ticker_id) REFERENCES tickers(id)
+                    )`);
+
+                    // Create ticker_historical table
+                    db.run(`CREATE TABLE IF NOT EXISTS ticker_historical (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        ticker_id INTEGER,
+                        trade_date DATE,
+                        open_price REAL,
+                        high_price REAL,
+                        low_price REAL,
+                        close_price REAL,
+                        adj_close_price REAL,
+                        volume INTEGER,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY(ticker_id) REFERENCES tickers(id)
+                    )`, (err) => {
+                        if (err) reject(err);
+                        else resolve();
+                    });
+                });
+            });
+
+            const exportedCounts = {
+                tickers: 0,
+                ticker_quotes: 0,
+                ticker_metadata: 0,
+                ticker_historical: 0
+            };
+
+            // Export tickers in chunks to avoid query timeouts
+            progress('📈 Exporting tickers...');
+            const chunkSize = 1000; // Process 1000 tickers at a time
+            let offset = 0;
+            let totalExported = 0;
+            let rowId = 1;
+            
+            // Build WHERE clause based on activeOnly setting
+            const { activeOnly = true } = options;
+            const whereClause = activeOnly ? 'WHERE active = true' : '';
+            const activeText = activeOnly ? 'active ' : '';
+            
+            // Get total count first
+            const countResult = await this.query(`SELECT COUNT(*) as count FROM tickers ${whereClause}`);
+            const totalTickers = parseInt(countResult.rows[0].count);
+            
+            progress(`📊 Will export ${totalTickers} ${activeText}tickers...`);
+            
+            while (offset < totalTickers) {
+                progress(`📈 Export Progress: ${totalExported}/${totalTickers} (${Math.round(totalExported/totalTickers*100)}%)`);
+                
+                const tickersResult = await this.query(
+                    `SELECT * FROM tickers ${whereClause} ORDER BY id LIMIT $1 OFFSET $2`,
+                    [chunkSize, offset]
+                );
+                
+                if (tickersResult.rows.length > 0) {
+                    await new Promise((resolve, reject) => {
+                        db.serialize(() => {
+                            const stmt = db.prepare(`INSERT INTO tickers 
+                                (id, symbol, active, exchanges, current_price, created_at, updated_at) 
+                                VALUES (?, ?, ?, ?, ?, ?, ?)`);
+                            
+                            for (const row of tickersResult.rows) {
+                                stmt.run(
+                                    rowId++, row.symbol, row.active, 
+                                    Array.isArray(row.exchanges) ? JSON.stringify(row.exchanges) : row.exchanges,
+                                    row.current_price, row.created_at, row.updated_at
+                                );
+                            }
+                            
+                            stmt.finalize((err) => {
+                                if (err) reject(err);
+                                else resolve();
+                            });
+                        });
+                    });
+                    
+                    totalExported += tickersResult.rows.length;
+                }
+                
+                offset += chunkSize;
+            }
+            
+            exportedCounts.tickers = totalExported;
+            progress(`✅ Exported ${exportedCounts.tickers} tickers`);
+
+            // Export ticker_quotes
+            if (options.includeTickerData !== false) {
+                progress('💰 Exporting ticker quotes...');
+                
+                // Use chunked processing to avoid memory issues
+                let offset = 0;
+                const chunkSize = 10000;
+                let totalQuotes = 0;
+                let rowId = 1;
+
+                // Build JOIN clause for active filter if needed
+                const joinClause = activeOnly ? 
+                    `FROM ticker_quotes tq 
+                     INNER JOIN tickers t ON tq.ticker_id = t.id AND t.active = true` : 
+                    `FROM ticker_quotes tq`;
+
+                while (true) {
+                    const quotesResult = await this.query(
+                        `SELECT tq.* ${joinClause}
+                         ORDER BY tq.ticker_id, tq.quote_time 
+                         LIMIT $1 OFFSET $2`, 
+                        [chunkSize, offset]
+                    );
+
+                    if (quotesResult.rows.length === 0) break;
+
+                    progress(`💰 Processing ticker quotes chunk ${Math.floor(offset/chunkSize) + 1}... (${totalQuotes} records so far)`);
+
+                    await new Promise((resolve, reject) => {
+                        db.serialize(() => {
+                            const stmt = db.prepare(`INSERT INTO ticker_quotes 
+                                (id, ticker_id, quote_time, regular_market_price, regular_market_change, 
+                                regular_market_change_percent, regular_market_previous_close, 
+                                regular_market_open, regular_market_day_low, regular_market_day_high, 
+                                regular_market_volume, created_at) 
+                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+                            
+                            for (const row of quotesResult.rows) {
+                                stmt.run(
+                                    rowId++, row.ticker_id, row.quote_time, row.regular_market_price,
+                                    row.regular_market_change, row.regular_market_change_percent,
+                                    row.regular_market_previous_close, row.regular_market_open,
+                                    row.regular_market_day_low, row.regular_market_day_high,
+                                    row.regular_market_volume, row.created_at
+                                );
+                                totalQuotes++;
+                            }
+                            
+                            stmt.finalize((err) => {
+                                if (err) reject(err);
+                                else resolve();
+                            });
+                        });
+                    });
+
+                    offset += chunkSize;
+                    
+                    // Progress update every few chunks
+                    if (offset % (chunkSize * 5) === 0) {
+                        progress(`💰 Ticker quotes progress: ${totalQuotes} records exported so far...`);
+                    }
+                }
+                
+                exportedCounts.ticker_quotes = totalQuotes;
+                progress(`✅ Exported ${exportedCounts.ticker_quotes} ticker quotes`);
+
+                // Export ticker_metadata with chunking
+                progress('📋 Exporting ticker metadata...');
+                offset = 0;
+                let totalMetadata = 0;
+                rowId = 1;
+
+                while (true) {
+                    const metadataResult = await this.query(
+                        `SELECT * FROM ticker_metadata 
+                         ORDER BY ticker_id, fetch_date 
+                         LIMIT $1 OFFSET $2`, 
+                        [chunkSize, offset]
+                    );
+
+                    if (metadataResult.rows.length === 0) break;
+
+                    progress(`📋 Processing ticker metadata chunk ${Math.floor(offset/chunkSize) + 1}... (${totalMetadata} records so far)`);
+
+                    await new Promise((resolve, reject) => {
+                        db.serialize(() => {
+                            const stmt = db.prepare(`INSERT INTO ticker_metadata 
+                                (id, ticker_id, fetch_date, data_source, version, had_validation_warnings,
+                                historical_start_date, historical_end_date, historical_record_count,
+                                summary_modules_count, created_at) 
+                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+                            
+                            for (const row of metadataResult.rows) {
+                                stmt.run(
+                                    rowId++, row.ticker_id, row.fetch_date, row.data_source, 
+                                    row.version, row.had_validation_warnings, row.historical_start_date,
+                                    row.historical_end_date, row.historical_record_count, 
+                                    row.summary_modules_count, row.created_at
+                                );
+                                totalMetadata++;
+                            }
+                            
+                            stmt.finalize((err) => {
+                                if (err) reject(err);
+                                else resolve();
+                            });
+                        });
+                    });
+
+                    offset += chunkSize;
+                    
+                    // Progress update every few chunks
+                    if (offset % (chunkSize * 5) === 0) {
+                        progress(`📋 Ticker metadata progress: ${totalMetadata} records exported so far...`);
+                    }
+                }
+                
+                exportedCounts.ticker_metadata = totalMetadata;
+                progress(`✅ Exported ${exportedCounts.ticker_metadata} ticker metadata records`);
+            }
+
+            // Export ticker_historical (if requested)
+            if (options.includeHistorical) {
+                progress('📊 Starting historical data export...');
+                
+                // Build date constraint based on historicalDays
+                let dateConstraint = '';
+                let dateParams = [];
+                if (options.historicalDays && options.historicalDays > 0) {
+                    dateConstraint = `WHERE trade_date >= CURRENT_DATE - INTERVAL '${options.historicalDays} days'`;
+                    progress(`📅 Filtering historical data to last ${options.historicalDays} days`);
+                } else {
+                    progress('📅 Exporting all historical data');
+                }
+                
+                // Get historical data in chunks to avoid memory issues
+                let offset = 0;
+                const chunkSize = 10000;
+                let totalHistorical = 0;
+
+                while (true) {
+                    const historicalResult = await this.query(
+                        `SELECT * FROM ticker_historical 
+                         ${dateConstraint}
+                         ORDER BY ticker_id, trade_date 
+                         LIMIT $1 OFFSET $2`, 
+                        [chunkSize, offset]
+                    );
+
+                    if (historicalResult.rows.length === 0) break;
+
+                    progress(`📈 Processing historical data chunk ${Math.floor(offset/chunkSize) + 1}... (${totalHistorical} records so far)`);
+
+                    await new Promise((resolve, reject) => {
+                        db.serialize(() => {
+                            const stmt = db.prepare(`INSERT INTO ticker_historical 
+                                (ticker_id, trade_date, open_price, high_price, low_price, 
+                                close_price, adj_close_price, volume, created_at) 
+                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+                            
+                            for (const row of historicalResult.rows) {
+                                stmt.run(
+                                    row.ticker_id, row.trade_date, row.open_price, 
+                                    row.high_price, row.low_price, row.close_price, 
+                                    row.adj_close_price, row.volume, row.created_at
+                                );
+                                totalHistorical++;
+                            }
+                            
+                            stmt.finalize((err) => {
+                                if (err) reject(err);
+                                else resolve();
+                            });
+                        });
+                    });
+
+                    offset += chunkSize;
+                    
+                    // Progress update every few chunks
+                    if (offset % (chunkSize * 5) === 0) {
+                        progress(`📈 Historical data progress: ${totalHistorical} records exported so far...`);
+                    }
+                }
+                
+                exportedCounts.ticker_historical = totalHistorical;
+                progress(`✅ Exported ${exportedCounts.ticker_historical} historical records`);
+            }
+
+            // Close SQLite database
+            progress('💾 Finalizing SQLite database...');
+            await new Promise((resolve, reject) => {
+                db.close((err) => {
+                    if (err) reject(err);
+                    else resolve();
+                });
+            });
+
+            // Get file size
+            const stats = fs.statSync(exportPath);
+            const fileSizeMB = (stats.size / 1024 / 1024).toFixed(2);
+
+            const result = {
+                success: true,
+                exportPath,
+                fileSizeMB: `${fileSizeMB} MB`,
+                exportedCounts,
+                options
+            };
+
+            progress('✅ SQLite export completed successfully!');
+            progress(`📊 Export Summary:`);
+            progress(`   File: ${exportPath}`);
+            progress(`   Size: ${fileSizeMB} MB`);
+            progress(`   Tickers: ${exportedCounts.tickers}`);
+            progress(`   Quotes: ${exportedCounts.ticker_quotes}`);
+            progress(`   Metadata: ${exportedCounts.ticker_metadata}`);
+            progress(`   Historical: ${exportedCounts.ticker_historical}`);
+
+            return result;
+
+        } catch (error) {
+            const errorMsg = `❌ SQLite export failed: ${error.message}`;
+            if (progressCallback) {
+                progressCallback(errorMsg);
+            }
+            console.error('SQLite export error:', error);
+            
+            // Ensure database connection is closed before cleanup
+            if (db) {
+                try {
+                    await new Promise((resolve) => {
+                        db.close((err) => {
+                            if (err) {
+                                console.error('Error closing SQLite database:', err);
+                            }
+                            resolve(); // Always resolve to continue cleanup
+                        });
+                    });
+                    console.log('🔒 SQLite database connection closed');
+                } catch (closeError) {
+                    console.error('Error during database close:', closeError);
+                }
+            }
+            
+            // Now safe to delete the partial file
+            if (fs.existsSync(exportPath)) {
+                try {
+                    fs.unlinkSync(exportPath);
+                    console.log(`🗑️ Cleaned up partial SQLite file: ${exportPath}`);
+                } catch (deleteError) {
+                    console.error('Error deleting partial SQLite file:', deleteError);
+                }
+            }
+            
+            throw error;
+        }
     }
 }
 

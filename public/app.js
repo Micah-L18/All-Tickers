@@ -2,6 +2,10 @@ let currentPage = 1;
 let isCommandRunning = false;
 let currentProcessId = null;
 let searchTimeout = null;
+let progressPollingInterval = null;
+
+// Global state for exports
+let activeExports = new Map(); // Track files currently being exported with format info
 
 // Helper function to format timestamps as "time ago"
 function formatTimeAgo(timestamp) {
@@ -45,17 +49,68 @@ function handleViewChange() {
     loadTickers(1); // Reset to page 1 when changing view
 }
 
+// Manual refresh function
+function refreshTickers() {
+    const refreshBtn = document.getElementById('refresh-btn');
+    const icon = refreshBtn.querySelector('i');
+    
+    // Add spinning animation
+    icon.classList.add('fa-spin');
+    refreshBtn.disabled = true;
+    
+    // Reload both status and tickers
+    Promise.all([loadSystemStatus(), loadTickers(currentPage)])
+        .finally(() => {
+            // Remove spinning animation
+            icon.classList.remove('fa-spin');
+            refreshBtn.disabled = false;
+        });
+}
+
 // Initialize the dashboard
 document.addEventListener('DOMContentLoaded', function() {
     loadSystemStatus();
     loadTickers(1);
     loadFiles();
     
-    // Auto-refresh status every 30 seconds
-    setInterval(loadSystemStatus, 30000);
+    // Auto-refresh just stats numbers every 10 seconds (lightweight)
+    setInterval(updateStatsNumbers, 10000);
+    // Full status refresh every 60 seconds (includes running processes, etc.)
+    setInterval(loadSystemStatus, 60000);
     // Auto-refresh files every 10 seconds
     setInterval(loadFiles, 10000);
+    // Auto-refresh tickers every 30 seconds (less frequent to avoid disruption)
+    setInterval(() => loadTickers(currentPage), 30000);
 });
+
+// Function to update just the stats numbers without reloading the entire status
+async function updateStatsNumbers() {
+    try {
+        const response = await fetch('/api/status');
+        const data = await response.json();
+        
+        if (data.stats) {
+            // Update each stat number individually
+            const statElements = {
+                'total': document.querySelector('#status-overview .text-primary'),
+                'validated': document.querySelector('#status-overview .text-info'),
+                'active': document.querySelector('#status-overview .text-success'),
+                'need_validation': document.querySelector('#status-overview .text-warning'),
+                'need_data_update': document.querySelector('#status-overview .text-danger')
+            };
+            
+            if (statElements.total) statElements.total.textContent = (data.stats.total || 0).toLocaleString();
+            if (statElements.validated) statElements.validated.textContent = (data.stats.validated || 0).toLocaleString();
+            if (statElements.active) statElements.active.textContent = (data.stats.active || 0).toLocaleString();
+            if (statElements.need_validation) statElements.need_validation.textContent = (data.stats.need_validation || 0).toLocaleString();
+            if (statElements.need_data_update) statElements.need_data_update.textContent = (data.stats.need_data_update || 0).toLocaleString();
+        }
+    } catch (error) {
+        console.log('Error updating stats numbers:', error);
+        // Fallback to full status refresh if selective update fails
+        loadSystemStatus();
+    }
+}
 
 async function loadSystemStatus() {
     try {
@@ -103,20 +158,14 @@ async function loadSystemStatus() {
                     </div>
                     <div class="col-md-2">
                         <div class="text-center">
-                            <h3 class="text-success">${(data.stats.active || 0).toLocaleString()}</h3>
-                            <small>Active Tickers</small>
-                        </div>
-                    </div>
-                    <div class="col-md-2">
-                        <div class="text-center">
                             <h3 class="text-info">${(data.stats.validated || 0).toLocaleString()}</h3>
                             <small>Validated Tickers</small>
                         </div>
                     </div>
                     <div class="col-md-2">
                         <div class="text-center">
-                            <h3 class="text-secondary">${data.stats.exchanges || 0}</h3>
-                            <small>Exchanges</small>
+                            <h3 class="text-success">${(data.stats.active || 0).toLocaleString()}</h3>
+                            <small>Active Tickers</small>
                         </div>
                     </div>
                     <div class="col-md-2">
@@ -126,7 +175,7 @@ async function loadSystemStatus() {
                             <br><small class="text-muted">(never or >5 days)</small>
                         </div>
                     </div>
-                    <div class="col-md-2">
+                    <div class="col-md-4">
                         <div class="text-center">
                             <h3 class="text-danger">${(data.stats.need_data_update || 0).toLocaleString()}</h3>
                             <small>Need Data Update</small>
@@ -227,7 +276,7 @@ async function loadTickers(page = 1) {
         const loadingMessage = viewType === 'errors' ? 'Loading errors...' : 'Loading tickers...';
         tableBody.innerHTML = `
             <tr>
-                <td colspan="6" class="text-center">
+                <td colspan="5" class="text-center">
                     <div class="spinner-border spinner-border-sm" role="status">
                         <span class="visually-hidden">Loading...</span>
                     </div>
@@ -257,7 +306,7 @@ async function loadTickers(page = 1) {
         console.error('Error loading data:', error);
         tableBody.innerHTML = `
             <tr>
-                <td colspan="6" class="text-center text-danger">
+                <td colspan="5" class="text-center text-danger">
                     Error loading data: ${error.message}
                 </td>
             </tr>
@@ -283,13 +332,24 @@ function displayTickers(data) {
     const tableBody = document.getElementById('ticker-table');
     const tableHeader = document.getElementById('table-header');
     
+    // Check if data has tickers property (handle API error case)
+    if (!data || !data.tickers) {
+        tableBody.innerHTML = `
+            <tr>
+                <td colspan="5" class="text-center text-danger">
+                    Error loading tickers: Invalid data received
+                </td>
+            </tr>
+        `;
+        return;
+    }
+    
     // Update table header for tickers
     tableHeader.innerHTML = `
         <tr>
             <th>Ticker</th>
             <th>Status</th>
             <th>Price</th>
-            <th>Exchange</th>
             <th>Last Updated</th>
             <th>Actions</th>
         </tr>
@@ -299,32 +359,38 @@ function displayTickers(data) {
         const searchInfo = data.search ? ` matching "${data.search}"` : '';
         tableBody.innerHTML = `
             <tr>
-                <td colspan="6" class="text-center text-muted">
+                <td colspan="5" class="text-center text-muted">
                     No tickers found${searchInfo}
                 </td>
             </tr>
         `;
     } else {
-        tableBody.innerHTML = data.tickers.map(ticker => `
-            <tr class="ticker-row">
-                <td><strong>${ticker.ticker}</strong></td>
-                <td>
-                    <span class="badge ${ticker.active ? 'bg-success' : 'bg-secondary'}">
-                        ${ticker.active ? 'Active' : 'Inactive'}
-                    </span>
-                </td>
-                <td>${ticker.price && ticker.price !== -1 ? `$${ticker.price}` : 'N/A'}</td>
-                <td>${ticker.exchanges && ticker.exchanges.length > 0 ? ticker.exchanges.join(', ') : 'N/A'}</td>
-                <td>${ticker.last_checked ? formatTimeAgo(ticker.last_checked) : 'Never'}</td>
-                <td>
-                    <button class="btn btn-sm btn-outline-primary" 
-                            onclick="validateRowTicker('${ticker.ticker}', this)"
-                            title="Validate ${ticker.ticker}">
-                        <i class="fas fa-check"></i>
-                    </button>
-                </td>
-            </tr>
-        `).join('');
+        tableBody.innerHTML = data.tickers.map(ticker => {
+            // Show N/A for inactive tickers or when price is invalid
+            const priceDisplay = ticker.active && ticker.price && ticker.price !== -1 
+                ? `$${parseFloat(ticker.price).toFixed(2)}` 
+                : 'N/A';
+            
+            return `
+                <tr class="ticker-row">
+                    <td><strong>${ticker.ticker}</strong></td>
+                    <td>
+                        <span class="badge ${ticker.active ? 'bg-success' : 'bg-secondary'}">
+                            ${ticker.active ? 'Active' : 'Inactive'}
+                        </span>
+                    </td>
+                    <td>${priceDisplay}</td>
+                    <td>${ticker.last_checked ? formatTimeAgo(ticker.last_checked) : 'Never'}</td>
+                    <td>
+                        <button class="btn btn-sm btn-outline-primary" 
+                                onclick="validateRowTicker('${ticker.ticker}', this)"
+                                title="Validate ${ticker.ticker}">
+                            <i class="fas fa-check"></i>
+                        </button>
+                    </td>
+                </tr>
+            `;
+        }).join('');
     }
 }
 
@@ -332,13 +398,24 @@ function displayErrors(data) {
     const tableBody = document.getElementById('ticker-table');
     const tableHeader = document.getElementById('table-header');
     
+    // Check if data has errors property (handle API error case)
+    if (!data || !data.errors) {
+        tableBody.innerHTML = `
+            <tr>
+                <td colspan="5" class="text-center text-danger">
+                    Error loading errors: Invalid data received
+                </td>
+            </tr>
+        `;
+        return;
+    }
+    
     // Update table header for errors
     tableHeader.innerHTML = `
         <tr>
             <th>Ticker</th>
             <th>Error Type</th>
             <th>Price</th>
-            <th>Exchange</th>
             <th>Last Updated</th>
             <th>Actions</th>
         </tr>
@@ -348,7 +425,7 @@ function displayErrors(data) {
         const searchInfo = data.search ? ` matching "${data.search}"` : '';
         tableBody.innerHTML = `
             <tr>
-                <td colspan="6" class="text-center text-muted">
+                <td colspan="5" class="text-center text-muted">
                     No errors found${searchInfo}
                 </td>
             </tr>
@@ -362,8 +439,7 @@ function displayErrors(data) {
                         ${error.error_type}
                     </span>
                 </td>
-                <td>${error.price && error.price !== -1 ? `$${error.price}` : 'N/A'}</td>
-                <td>${error.exchanges && error.exchanges.length > 0 ? error.exchanges.join(', ') : 'N/A'}</td>
+                <td>${error.price && error.price !== -1 ? `$${parseFloat(error.price).toFixed(2)}` : 'N/A'}</td>
                 <td>${error.last_checked ? formatTimeAgo(error.last_checked) : 'Never'}</td>
                 <td>
                     <button class="btn btn-sm btn-outline-warning" 
@@ -568,58 +644,119 @@ async function loadFiles() {
         const response = await fetch('/api/files');
         const data = await response.json();
         
-        const outputFiles = data.files.filter(file => file.type === 'output');
-        const databaseFiles = data.files.filter(file => file.type === 'database');
+        // Get all files (now includes both output and processing files)
+        const files = data.files || [];
         
-        // Update output files section
-        const outputFilesDiv = document.getElementById('output-files');
-        if (outputFiles.length === 0) {
-            outputFilesDiv.innerHTML = '<div class="text-center text-muted"><small>No output files available</small></div>';
-        } else {
-            outputFilesDiv.innerHTML = outputFiles.map(file => `
-                <div class="file-item">
-                    <div class="d-flex justify-content-between align-items-center">
-                        <div>
-                            <strong>${file.name}</strong>
-                            <div class="file-size">
-                                ${formatFileSize(file.size)} • Modified: ${new Date(file.modified).toLocaleString()}
-                            </div>
-                        </div>
-                        <button class="btn btn-sm btn-outline-primary download-btn" onclick="downloadFile('${file.path}', '${file.name}')">
-                            <i class="fas fa-download"></i> Download
-                        </button>
-                    </div>
-                </div>
-            `).join('');
+        // Add pending exports that don't exist as files yet
+        const allFilesToShow = [...files];
+        
+        // Add pending exports to the display (that aren't already in processing)
+        for (const [fileName, exportInfo] of activeExports) {
+            // Only add if the file doesn't already exist in the files list
+            if (!files.find(file => file.name === fileName)) {
+                allFilesToShow.push({
+                    name: fileName,
+                    size: 0,
+                    modified: new Date().toISOString(),
+                    path: `processing/${fileName}`,
+                    isPending: true,
+                    status: 'starting',
+                    exportFormat: exportInfo.format
+                });
+            }
         }
         
-        // Update database files section
-        const databaseFilesDiv = document.getElementById('database-files');
-        if (databaseFiles.length === 0) {
-            databaseFilesDiv.innerHTML = '<div class="text-center text-muted"><small>No database files available</small></div>';
+        const outputFilesDiv = document.getElementById('output-files');
+        if (allFilesToShow.length === 0) {
+            outputFilesDiv.innerHTML = '<div class="col-12 text-center text-muted"><small>No files available</small></div>';
         } else {
-            databaseFilesDiv.innerHTML = databaseFiles.map(file => `
-                <div class="file-item">
-                    <div class="d-flex justify-content-between align-items-center">
-                        <div>
-                            <strong>${file.name}</strong>
-                            <div class="file-size">
-                                ${formatFileSize(file.size)} • Modified: ${new Date(file.modified).toLocaleString()}
+            // Create 3-column layout with file cards
+            outputFilesDiv.innerHTML = allFilesToShow.map(file => {
+                const fileExtension = file.name.split('.').pop().toLowerCase();
+                let iconClass = 'fas fa-file';
+                let iconColor = '#6c757d';
+                
+                // Set icon based on file type
+                switch (fileExtension) {
+                    case 'json':
+                        iconClass = 'fas fa-file-code';
+                        iconColor = '#28a745';
+                        break;
+                    case 'csv':
+                        iconClass = 'fas fa-file-csv';
+                        iconColor = '#007bff';
+                        break;
+                    case 'db':
+                    case 'sqlite':
+                        iconClass = 'fas fa-database';
+                        iconColor = '#ffc107';
+                        break;
+                }
+                
+                const isExporting = activeExports.has(file.name) || file.status === 'processing';
+                const isPending = file.isPending || file.status === 'processing';
+                
+                return `
+                    <div class="col-lg-4 col-md-6 col-sm-12">
+                        <div class="file-card ${isPending ? 'border-warning' : ''}" data-filename="${file.name}">
+                            <div class="text-center">
+                                <div class="file-icon" style="color: ${isExporting ? '#ffc107' : iconColor}">
+                                    ${isExporting 
+                                        ? '<div class="spinner-border spinner-border-sm" role="status"><span class="visually-hidden">Loading...</span></div>'
+                                        : `<i class="${iconClass}"></i>`
+                                    }
+                                </div>
+                                <div class="file-name">${file.name}</div>
+                                <div class="file-size">
+                                    ${isPending ? '<span class="processing-status">Preparing...</span>' : formatFileSize(file.size)}
+                                </div>
+                                <div class="file-size">
+                                    ${isPending 
+                                        ? '<span class="processing-progress">Export in progress</span>' 
+                                        : `${new Date(file.modified).toLocaleDateString()} ${new Date(file.modified).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}`
+                                    }
+                                </div>
+                                <div class="file-actions">
+                                    ${isExporting 
+                                        ? `<div class="d-flex align-items-center justify-content-center flex-column">
+                                               <div class="d-flex align-items-center mb-2">
+                                                   <div class="spinner-border spinner-border-sm text-warning me-2" role="status">
+                                                       <span class="visually-hidden">Exporting...</span>
+                                                   </div>
+                                                   <small class="text-warning">Exporting ${activeExports.get(file.name)?.format?.toUpperCase() || file.type?.toUpperCase() || ''}...</small>
+                                               </div>
+                                               <div class="progress w-100" style="height: 4px;">
+                                                   <div class="progress-bar progress-bar-striped progress-bar-animated bg-warning" 
+                                                        style="width: 0%" 
+                                                        id="progress-${file.name.replace(/[^a-zA-Z0-9]/g, '-')}">
+                                                   </div>
+                                               </div>
+                                               <small class="text-muted mt-1" id="progress-text-${file.name.replace(/[^a-zA-Z0-9]/g, '-')}">0%</small>
+                                               <button class="btn btn-sm btn-outline-danger mt-2" onclick="cancelExport('${file.name}')" title="Cancel export">
+                                                   <i class="fas fa-times"></i> Cancel
+                                               </button>
+                                           </div>`
+                                        : `<button class="btn btn-sm btn-primary btn-file-action" onclick="downloadFile('${file.path}', '${file.name}')" title="Download file">
+                                               <i class="fas fa-download"></i> Download
+                                           </button>
+                                           <button class="btn btn-sm btn-danger btn-file-action" onclick="deleteFile('${file.name}', '${file.path}')" title="Delete file">
+                                               <i class="fas fa-trash"></i> Delete
+                                           </button>`
+                                    }
+                                </div>
                             </div>
                         </div>
-                        <button class="btn btn-sm btn-outline-success download-btn" onclick="downloadFile('${file.path}', '${file.name}')">
-                            <i class="fas fa-download"></i> Download
-                        </button>
                     </div>
-                </div>
-            `).join('');
+                `;
+            }).join('');
+            
+            // Start progress polling for processing files
+            startProgressPolling();
         }
         
     } catch (error) {
         document.getElementById('output-files').innerHTML = 
-            `<div class="alert alert-danger">Error loading files: ${error.message}</div>`;
-        document.getElementById('database-files').innerHTML = 
-            `<div class="alert alert-danger">Error loading files: ${error.message}</div>`;
+            `<div class="col-12"><div class="alert alert-danger">Error loading files: ${error.message}</div></div>`;
     }
 }
 
@@ -631,7 +768,81 @@ function formatFileSize(bytes) {
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
 }
 
+// Progress polling for export operations
+function startProgressPolling() {
+    if (progressPollingInterval) {
+        clearInterval(progressPollingInterval);
+    }
+    
+    progressPollingInterval = setInterval(async () => {
+        // Check if there are any processing files
+        const processingCards = document.querySelectorAll('.file-card[data-filename]');
+        let hasProcessingFiles = false;
+        
+        for (const card of processingCards) {
+            const filename = card.getAttribute('data-filename');
+            const isProcessing = card.querySelector('.spinner-border') !== null;
+            
+            if (isProcessing) {
+                hasProcessingFiles = true;
+                await updateProgressForFile(filename);
+            }
+        }
+        
+        // Stop polling if no files are being processed
+        if (!hasProcessingFiles && activeExports.size === 0) {
+            clearInterval(progressPollingInterval);
+            progressPollingInterval = null;
+        }
+    }, 2000); // Poll every 2 seconds
+}
+
+async function updateProgressForFile(filename) {
+    try {
+        const response = await fetch(`/api/export-progress/${encodeURIComponent(filename)}`);
+        const data = await response.json();
+        
+        if (data.success && data.progress) {
+            const progress = data.progress;
+            const sanitizedFilename = filename.replace(/[^a-zA-Z0-9]/g, '-');
+            const progressBar = document.getElementById(`progress-${sanitizedFilename}`);
+            const progressText = document.getElementById(`progress-text-${sanitizedFilename}`);
+            
+            if (progressBar && progressText) {
+                progressBar.style.width = `${progress.percentage}%`;
+                progressText.textContent = `${progress.percentage}% (${progress.current}/${progress.total})`;
+            }
+            
+            // Update status text in modal if export modal is open
+            const exportModal = document.getElementById('exportModal');
+            if (exportModal && exportModal.classList.contains('show')) {
+                updateModalProgress(progress);
+            }
+        }
+    } catch (error) {
+        console.warn('Failed to update progress for', filename, ':', error);
+    }
+}
+
+function updateModalProgress(progress) {
+    const statusElement = document.getElementById('export-status');
+    if (statusElement) {
+        statusElement.textContent = `Exporting... ${progress.percentage}% (${progress.current}/${progress.total} records)`;
+    }
+    
+    const progressBar = document.getElementById('export-progress-bar');
+    if (progressBar) {
+        progressBar.style.width = `${progress.percentage}%`;
+    }
+}
+
 function downloadFile(filePath, fileName) {
+    // Check if file is currently being exported
+    if (activeExports.has(fileName)) {
+        alert('This file is currently being exported. Please wait for the export to complete.');
+        return;
+    }
+    
     // Create a temporary link element and trigger download
     const link = document.createElement('a');
     link.href = filePath;
@@ -639,6 +850,82 @@ function downloadFile(filePath, fileName) {
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
+}
+
+async function deleteFile(fileName, filePath) {
+    // Check if file is currently being exported
+    if (activeExports.has(fileName)) {
+        alert('This file is currently being exported. Please wait for the export to complete before deleting.');
+        return;
+    }
+    
+    // Confirm deletion
+    if (!confirm(`Are you sure you want to delete "${fileName}"? This action cannot be undone.`)) {
+        return;
+    }
+    
+    try {
+        const response = await fetch(`/api/delete-file`, {
+            method: 'DELETE',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                fileName: fileName,
+                filePath: filePath
+            })
+        });
+        
+        const data = await response.json();
+        
+        if (data.success) {
+            // Refresh the file list
+            loadFiles();
+            
+            // Show success message (optional)
+            // You could add a toast notification here if desired
+        } else {
+            alert(`Failed to delete file: ${data.error}`);
+        }
+        
+    } catch (error) {
+        alert(`Error deleting file: ${error.message}`);
+    }
+}
+
+async function cancelExport(fileName) {
+    // Confirm cancellation
+    if (!confirm(`Are you sure you want to cancel the export of "${fileName}"? This will remove the partially exported file.`)) {
+        return;
+    }
+    
+    try {
+        const response = await fetch(`/api/cancel-export/${encodeURIComponent(fileName)}`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            }
+        });
+        
+        const data = await response.json();
+        
+        if (data.success) {
+            // Remove from active exports
+            activeExports.delete(fileName);
+            
+            // Refresh the file list to remove the processing file
+            loadFiles();
+            
+            // Show success message
+            alert(`Export of "${fileName}" has been cancelled.`);
+        } else {
+            alert(`Failed to cancel export: ${data.error}`);
+        }
+        
+    } catch (error) {
+        console.error('Error cancelling export:', error);
+        alert(`Error cancelling export: ${error.message}`);
+    }
 }
 
 // Interactive input functions
@@ -844,7 +1131,7 @@ async function validateRowTicker(symbol, buttonElement) {
         
         if (response.ok) {
             const result = data.result;
-            const isValid = result.validation.active;
+            const isValid = result.active; // Fixed: use result.active instead of result.validation.active
             
             // Update the row with new data
             if (isValid) {
@@ -854,16 +1141,10 @@ async function validateRowTicker(symbol, buttonElement) {
                 
                 // Update price
                 const priceCell = row.cells[2];
-                priceCell.textContent = `$${result.validation.price}`;
-                
-                // Update exchange
-                const exchangeCell = row.cells[3];
-                exchangeCell.textContent = result.validation.exchanges && result.validation.exchanges.length > 0 
-                    ? result.validation.exchanges.join(', ') 
-                    : result.validation.exchange || 'N/A';
+                priceCell.textContent = `$${parseFloat(result.price).toFixed(2)}`;
                 
                 // Update last checked
-                const lastCheckedCell = row.cells[4];
+                const lastCheckedCell = row.cells[3];
                 lastCheckedCell.textContent = new Date().toLocaleString();
                 
                 // Show success feedback
@@ -873,12 +1154,20 @@ async function validateRowTicker(symbol, buttonElement) {
                 const statusCell = row.cells[1];
                 statusCell.innerHTML = '<span class="badge bg-secondary">Inactive</span>';
                 
+                // Update price
+                const priceCell = row.cells[2];
+                priceCell.textContent = 'N/A';
+                
+                // Update last checked
+                const lastCheckedCell = row.cells[3];
+                lastCheckedCell.textContent = new Date().toLocaleString();
+                
                 // Show warning feedback
                 showRowFeedback(buttonElement, 'warning', 'fas fa-exclamation-triangle');
             }
             
-            // Refresh system status to update counts
-            loadSystemStatus();
+            // Update stats numbers without full page refresh
+            updateStatsNumbers();
         } else {
             showRowFeedback(buttonElement, 'danger', 'fas fa-times-circle');
         }
@@ -909,65 +1198,245 @@ function showRowFeedback(buttonElement, type, iconClass) {
     buttonElement.innerHTML = `<i class="${iconClass}"></i>`;
 }
 
-// SQLite Export functions
-function showSQLiteExportModal() {
-    const modal = new bootstrap.Modal(document.getElementById('sqliteExportModal'));
+// Unified Export functions
+function showExportModal() {
+    const modal = new bootstrap.Modal(document.getElementById('exportModal'));
     
     // Reset form
-    document.getElementById('sqlite-filename').value = 'all-tickers-export';
-    document.getElementById('include-ticker-data').checked = true;
-    document.getElementById('include-historical').checked = true;
-    document.getElementById('historical-limit').value = '100000';
+    document.getElementById('export-filename').value = 'all-tickers-export';
+    document.getElementById('format-json').checked = true;
+    
+    // Reset time range selection to default (30 days)
+    selectTimeRange('30');
+    
+    // Update UI based on selected format
+    updateFormatUI();
     
     // Hide progress and results
     document.getElementById('export-progress').style.display = 'none';
     document.getElementById('export-result').style.display = 'none';
     
-    // Show/hide historical limit based on checkbox
-    const historicalCheckbox = document.getElementById('include-historical');
-    const limitSection = document.getElementById('historical-limit-section');
+    // Setup format change listeners
+    document.querySelectorAll('input[name="exportFormat"]').forEach(radio => {
+        radio.addEventListener('change', updateFormatUI);
+    });
     
-    function toggleLimitSection() {
-        limitSection.style.display = historicalCheckbox.checked ? 'block' : 'none';
-    }
-    
-    historicalCheckbox.addEventListener('change', toggleLimitSection);
-    toggleLimitSection(); // Set initial state
+    // Setup time range button listeners
+    document.querySelectorAll('.time-range-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+            selectTimeRange(btn.dataset.days);
+        });
+    });
     
     modal.show();
 }
 
-async function startSQLiteExport() {
-    const filename = document.getElementById('sqlite-filename').value.trim();
-    const includeTickerData = document.getElementById('include-ticker-data').checked;
-    const includeHistorical = document.getElementById('include-historical').checked;
-    const historicalLimit = parseInt(document.getElementById('historical-limit').value) || 100000;
+function updateFormatUI() {
+    const selectedFormat = document.querySelector('input[name="exportFormat"]:checked').value;
+    const fileExtension = document.getElementById('file-extension');
+    const fileLocation = document.getElementById('file-location');
+    const sqliteOptions = document.getElementById('sqlite-options');
+    const timeRangeSection = document.getElementById('time-range-section');
+    
+    // Update file extension and location
+    switch (selectedFormat) {
+        case 'json':
+            fileExtension.textContent = '.json';
+            fileLocation.textContent = 'File will be saved to the output/ folder';
+            sqliteOptions.style.display = 'none';
+            timeRangeSection.style.display = 'block';
+            break;
+        case 'csv':
+            fileExtension.textContent = '.csv';
+            fileLocation.textContent = 'File will be saved to the output/ folder';
+            sqliteOptions.style.display = 'none';
+            timeRangeSection.style.display = 'none'; // Hide time range for CSV
+            break;
+        case 'sqlite':
+            fileExtension.textContent = '.db';
+            fileLocation.textContent = 'File will be saved to the output/ folder'; // Changed from db/ to output/
+            sqliteOptions.style.display = 'block';
+            
+            // Show/hide time range section based on historical checkbox
+            const historicalCheckbox = document.getElementById('include-historical');
+            function toggleTimeRangeSection() {
+                timeRangeSection.style.display = historicalCheckbox.checked ? 'block' : 'none';
+            }
+            historicalCheckbox.addEventListener('change', toggleTimeRangeSection);
+            toggleTimeRangeSection();
+            break;
+    }
+}
+
+function selectTimeRange(days) {
+    // Update visual selection
+    document.querySelectorAll('.time-range-btn').forEach(btn => {
+        btn.classList.remove('btn-primary', 'btn-success');
+        btn.classList.add('btn-outline-primary');
+        if (btn.dataset.days === 'all') {
+            btn.classList.remove('btn-outline-primary');
+            btn.classList.add('btn-outline-success');
+        }
+    });
+    
+    // Highlight selected button
+    const selectedBtn = document.querySelector(`[data-days="${days}"]`);
+    if (selectedBtn) {
+        selectedBtn.classList.remove('btn-outline-primary', 'btn-outline-success');
+        if (days === 'all') {
+            selectedBtn.classList.add('btn-success');
+        } else {
+            selectedBtn.classList.add('btn-primary');
+        }
+    }
+    
+    // Update display text
+    const rangeText = {
+        '7': 'Last 7 Days',
+        '30': 'Last 30 Days',
+        '90': 'Last 90 Days',
+        '180': 'Last 6 Months',
+        '365': 'Last 1 Year',
+        '730': 'Last 2 Years',
+        'all': 'All Historical Data'
+    };
+    
+    document.getElementById('selected-time-range').textContent = rangeText[days] || `Last ${days} Days`;
+    document.getElementById('selected-historical-days').value = days;
+    
+    // Hide custom input if it was showing
+    document.getElementById('custom-days-section').style.display = 'none';
+}
+
+function showCustomDaysInput() {
+    document.getElementById('custom-days-section').style.display = 'block';
+    document.getElementById('custom-days').focus();
+}
+
+function selectCustomDays() {
+    const customDays = parseInt(document.getElementById('custom-days').value);
+    if (!customDays || customDays < 1) {
+        alert('Please enter a valid number of days (minimum 1)');
+        return;
+    }
+    
+    // Clear button selections
+    document.querySelectorAll('.time-range-btn').forEach(btn => {
+        btn.classList.remove('btn-primary', 'btn-success');
+        btn.classList.add('btn-outline-primary');
+        if (btn.dataset.days === 'all') {
+            btn.classList.remove('btn-outline-primary');
+            btn.classList.add('btn-outline-success');
+        }
+    });
+    
+    // Update display
+    document.getElementById('selected-time-range').textContent = `Last ${customDays} Days (Custom)`;
+    document.getElementById('selected-historical-days').value = customDays;
+    document.getElementById('custom-days-section').style.display = 'none';
+}
+
+async function startExport() {
+    const filename = document.getElementById('export-filename').value.trim();
+    const selectedFormat = document.querySelector('input[name="exportFormat"]:checked').value;
+    const historicalDays = document.getElementById('selected-historical-days').value;
+    const activeOnly = document.getElementById('active-only').checked;
     
     if (!filename) {
         alert('Please enter a filename');
         return;
     }
     
-    // Show progress
+    // Create full filename with extension
+    const fileExtensions = {
+        'json': '.json',
+        'csv': '.csv', 
+        'sqlite': '.db'
+    };
+    const fullFilename = filename + fileExtensions[selectedFormat];
+    
+    // Track current modal export for cancellation
+    currentModalExportFilename = fullFilename;
+    
+    // Add to active exports to show loading state with format info
+    activeExports.set(fullFilename, {
+        format: selectedFormat,
+        startTime: new Date().toISOString()
+    });
+    
+    // Refresh files list to show loading indicator
+    loadFiles();
+    
+    // Show progress and hide/show appropriate buttons
     document.getElementById('export-progress').style.display = 'block';
     document.getElementById('export-result').style.display = 'none';
     document.getElementById('start-export-btn').disabled = true;
+    document.getElementById('start-export-btn').style.display = 'none';
+    document.getElementById('cancel-export-btn').style.display = 'inline-block';
+    
+    // Update progress text based on format
+    const statusElement = document.getElementById('export-status');
+    const formatNames = {
+        'json': 'JSON',
+        'csv': 'CSV',
+        'sqlite': 'SQLite database'
+    };
+    statusElement.textContent = `Exporting ${formatNames[selectedFormat]}...`;
     
     try {
-        const response = await fetch('/api/export-sqlite', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({
-                filename: filename,
-                options: {
-                    includeTickerData,
-                    includeHistorical,
-                    historicalLimit
-                }
-            })
-        });
+        let response;
+        
+        if (selectedFormat === 'sqlite') {
+            // SQLite export
+            const includeTickerData = document.getElementById('include-ticker-data').checked;
+            const includeHistorical = document.getElementById('include-historical').checked;
+            
+            response = await fetch('/api/export-sqlite', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    filename: filename,
+                    options: {
+                        includeTickerData,
+                        includeHistorical,
+                        activeOnly,
+                        historicalDays: historicalDays === 'all' ? null : parseInt(historicalDays)
+                    }
+                })
+            });
+        } else if (selectedFormat === 'csv') {
+            // CSV export
+            response = await fetch('/api/export-csv', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    filename: filename,
+                    activeOnly,
+                    historicalDays: null // Always export all data for CSV
+                })
+            });
+        } else {
+            // JSON export
+            response = await fetch('/api/export', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    filename: filename,
+                    activeOnly,
+                    historicalDays: historicalDays === 'all' ? null : parseInt(historicalDays)
+                })
+            });
+        }
+        
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        }
         
         const data = await response.json();
         
@@ -975,17 +1444,20 @@ async function startSQLiteExport() {
         document.getElementById('export-progress').style.display = 'none';
         
         if (data.success) {
+            const formatLabels = {
+                'json': 'JSON Export',
+                'csv': 'CSV Export',
+                'sqlite': 'SQLite Export'
+            };
+            
             // Show success result
             document.getElementById('export-result').innerHTML = `
                 <div class="alert alert-success">
-                    <h6><i class="fas fa-check-circle"></i> Export Successful!</h6>
-                    <p class="mb-1"><strong>File:</strong> ${data.result.filePath}</p>
-                    <p class="mb-1"><strong>Size:</strong> ${data.result.fileSizeMB} MB</p>
-                    <p class="mb-1"><strong>Tables:</strong> ${data.result.tablesExported}</p>
-                    <p class="mb-0"><strong>Records:</strong> ${data.result.totalRecords.toLocaleString()}</p>
+                    <h6><i class="fas fa-check-circle"></i> ${formatLabels[selectedFormat]} Successful!</h6>
+                    <p class="mb-1"><strong>File:</strong> ${data.exportPath}</p>
                     <hr>
                     <small class="text-muted">
-                        The SQLite database has been saved to the db/ folder and is available for download.
+                        The ${selectedFormat.toUpperCase()} file has been saved to the output/ folder.
                     </small>
                 </div>
             `;
@@ -1017,6 +1489,52 @@ async function startSQLiteExport() {
         `;
         document.getElementById('export-result').style.display = 'block';
     } finally {
+        // Remove from active exports
+        activeExports.delete(fullFilename);
+        
+        // Re-enable export button
         document.getElementById('start-export-btn').disabled = false;
+        
+        // Reset modal export tracking
+        currentModalExportFilename = null;
+        
+        // Hide cancel button and show start button
+        document.getElementById('cancel-export-btn').style.display = 'none';
+        document.getElementById('start-export-btn').style.display = 'inline-block';
+        
+        // Refresh files list to remove loading indicator
+        loadFiles();
     }
+}
+
+let currentModalExportFilename = null; // Track current modal export for cancellation
+
+async function cancelModalExport() {
+    if (!currentModalExportFilename) {
+        alert('No active export to cancel');
+        return;
+    }
+    
+    // Use the same cancel function as file cards
+    await cancelExport(currentModalExportFilename);
+    
+    // Clean up modal state
+    currentModalExportFilename = null;
+    
+    // Hide cancel button and show start button
+    document.getElementById('cancel-export-btn').style.display = 'none';
+    document.getElementById('start-export-btn').style.display = 'inline-block';
+    document.getElementById('start-export-btn').disabled = false;
+    
+    // Hide progress
+    document.getElementById('export-progress').style.display = 'none';
+    
+    // Show cancellation message
+    document.getElementById('export-result').innerHTML = `
+        <div class="alert alert-warning">
+            <h6><i class="fas fa-ban"></i> Export Cancelled</h6>
+            <p class="mb-0">The export operation has been cancelled and any partial files have been removed.</p>
+        </div>
+    `;
+    document.getElementById('export-result').style.display = 'block';
 }

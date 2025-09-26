@@ -10,7 +10,50 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // Store running processes for interactive input
+// Initialize process tracking
 const runningProcesses = new Map();
+
+// Global instances for export progress tracking
+let dataExporterInstance = null;
+
+// Helper function to get or create data exporter instance
+async function getDataExporter() {
+    if (!dataExporterInstance) {
+        const { DataExporter } = require('./src/export/export-data');
+        // Pass the existing dbManager to avoid creating new connections
+        dataExporterInstance = new DataExporter(dbManager);
+        await dataExporterInstance.initialize();
+    }
+    return dataExporterInstance;
+}
+
+// Clean up old completed processes periodically (every 10 minutes)
+setInterval(() => {
+    const now = new Date();
+    const processesToCleanup = [];
+    
+    for (const [processId, processInfo] of runningProcesses.entries()) {
+        // Clean up processes completed more than 10 minutes ago
+        if (processInfo.status === 'completed' || processInfo.status === 'failed') {
+            if (processInfo.endTime && (now - processInfo.endTime) > 10 * 60 * 1000) {
+                processesToCleanup.push(processId);
+            }
+        }
+        // Clean up very old running processes (more than 2 hours)
+        else if (processInfo.status === 'running') {
+            if (processInfo.startTime && (now - processInfo.startTime) > 2 * 60 * 60 * 1000) {
+                processesToCleanup.push(processId);
+            }
+        }
+    }
+    
+    if (processesToCleanup.length > 0) {
+        console.log(`🧹 Cleaning up ${processesToCleanup.length} old processes...`);
+        processesToCleanup.forEach(processId => {
+            runningProcesses.delete(processId);
+        });
+    }
+}, 10 * 60 * 1000); // Every 10 minutes
 
 // Helper function to format duration in human-readable format
 function formatDuration(milliseconds) {
@@ -31,8 +74,67 @@ function formatDuration(milliseconds) {
 
 // Middleware
 app.use(cors());
-app.use(express.static('public'));
 app.use(express.json());
+// Serve static files from public directory
+app.use(express.static(path.join(__dirname, 'public')));
+
+// JSON Export endpoint
+app.post('/api/export', async (req, res) => {
+    try {
+        const { filename, historicalDays, activeOnly } = req.body;
+        
+        if (!filename) {
+            return res.status(400).json({ error: 'Filename is required' });
+        }
+        
+        const dataExporter = await getDataExporter();
+        
+        console.log(`📤 Starting JSON export with historical data: ${historicalDays ? `${historicalDays} days` : 'all data'}, active only: ${activeOnly ? 'yes' : 'no'}`);
+        
+        const exportPath = await dataExporter.exportToJSON(filename, { historicalDays, activeOnly });
+        
+        res.json({
+            success: true,
+            message: `Export completed successfully`,
+            exportPath
+        });
+        
+    } catch (error) {
+        console.error('❌ Export error:', error);
+        res.status(500).json({ 
+            error: `Failed to export data: ${error.message}` 
+        });
+    }
+});
+
+// CSV Export endpoint
+app.post('/api/export-csv', async (req, res) => {
+    try {
+        const { filename, historicalDays, activeOnly } = req.body;
+        
+        if (!filename) {
+            return res.status(400).json({ error: 'Filename is required' });
+        }
+        
+        const dataExporter = await getDataExporter();
+        
+        console.log(`📤 Starting CSV export with historical data: ${historicalDays ? `${historicalDays} days` : 'all data'}, active only: ${activeOnly ? 'yes' : 'no'}`);
+        
+        const exportPath = await dataExporter.exportToCSV(filename, { historicalDays, activeOnly });
+        
+        res.json({
+            success: true,
+            message: `CSV export completed successfully`,
+            exportPath
+        });
+        
+    } catch (error) {
+        console.error('❌ CSV Export error:', error);
+        res.status(500).json({ 
+            error: `Failed to export CSV data: ${error.message}` 
+        });
+    }
+});
 
 // Initialize PostgreSQL database manager
 const dbManager = new PostgreSQLManager();
@@ -58,12 +160,24 @@ app.get('/api/status', async (req, res) => {
         
         // Get recent activity - last 10 updated tickers
         const recentActivity = await dbManager.query(`
-            SELECT symbol, exchange, active, price, last_updated 
+            SELECT symbol as ticker, exchanges, active, price, last_updated 
             FROM tickers 
             WHERE last_updated IS NOT NULL 
             ORDER BY last_updated DESC 
             LIMIT 10
         `);
+
+        // Transform stats to match frontend expectations
+        const transformedStats = {
+            total: stats.total || '0',
+            active: stats.active_count || '0',
+            validated: stats.validated_count || '0', 
+            need_validation: stats.unvalidated_count || '0',
+            need_data_update: '0', // We'll calculate this separately if needed
+            historical_count: stats.historical_count || '0',
+            total_historical_records: stats.total_historical_records || '0',
+            database_size: stats.database_size || 'Unknown'
+        };
 
         // Get running process information
         const runningProcessInfo = Array.from(runningProcesses.entries()).map(([processId, process]) => {
@@ -82,7 +196,7 @@ app.get('/api/status', async (req, res) => {
 
         res.json({
             status: 'ready',
-            stats,
+            stats: transformedStats,
             recentActivity: recentActivity.rows,
             runningProcesses: runningProcessInfo
         });
@@ -100,9 +214,21 @@ app.get('/api/tickers', async (req, res) => {
         // Use the PostgreSQL manager's search function
         const searchTerm = search && search.trim() ? search.trim().toUpperCase() : '';
         let tickers;
+        let totalCount;
         
         if (searchTerm) {
-            tickers = await dbManager.searchTickers(searchTerm, parseInt(limit), parseInt(offset));
+            const searchResults = await dbManager.searchTickers(searchTerm, parseInt(limit), parseInt(offset));
+            tickers = searchResults.data.map(row => ({
+                ticker: row.symbol,
+                exchanges: row.exchanges,
+                active: row.active,
+                price: row.price,
+                last_checked: row.last_updated,
+                regular_market_price: row.regular_market_price,
+                market_cap: row.market_cap,
+                quote_time: row.quote_time
+            }));
+            totalCount = searchResults.total;
         } else {
             // Build filter conditions for PostgreSQL
             let whereClause = '';
@@ -136,20 +262,20 @@ app.get('/api/tickers', async (req, res) => {
             
             const result = await dbManager.query(query, queryParams);
             tickers = result.rows;
+            
+            // Get total count for non-search queries
+            const totalResult = await dbManager.query(`
+                SELECT COUNT(*) as count FROM tickers t
+                ${filter === 'active' ? 'WHERE t.active = true' : 
+                  filter === 'inactive' ? 'WHERE t.active = false' : 
+                  filter === 'validated' ? 'WHERE t.last_updated IS NOT NULL' : ''}
+            `);
+            totalCount = parseInt(totalResult.rows[0].count);
         }
-
-        // Get total count
-        const totalResult = await dbManager.query(`
-            SELECT COUNT(*) as count FROM tickers t
-            ${filter === 'active' ? 'WHERE t.active = true' : 
-              filter === 'inactive' ? 'WHERE t.active = false' : 
-              filter === 'validated' ? 'WHERE t.last_updated IS NOT NULL' : ''}
-            ${searchTerm ? (filter !== 'all' ? ' AND ' : 'WHERE ') + 't.symbol ILIKE $1' : ''}
-        `, searchTerm ? [`%${searchTerm}%`] : []);
 
         res.json({ 
             tickers, 
-            total: parseInt(totalResult.rows[0].count), 
+            total: totalCount, 
             page: parseInt(page), 
             limit: parseInt(limit),
             search: search || '',
@@ -621,6 +747,58 @@ app.post('/api/kill-process', (req, res) => {
     }
 });
 
+// Export progress endpoint
+app.get('/api/export-progress/:filename', async (req, res) => {
+    try {
+        const { filename } = req.params;
+        
+        if (dataExporterInstance) {
+            const progress = dataExporterInstance.getExportProgress(filename);
+            res.json({
+                success: true,
+                progress: progress || null
+            });
+        } else {
+            res.json({
+                success: true,
+                progress: null
+            });
+        }
+        
+    } catch (error) {
+        console.error('❌ Error getting export progress:', error);
+        res.status(500).json({ 
+            error: `Failed to get export progress: ${error.message}` 
+        });
+    }
+});
+
+// Cancel export endpoint
+app.post('/api/cancel-export/:filename', async (req, res) => {
+    try {
+        const { filename } = req.params;
+        
+        if (dataExporterInstance) {
+            const success = dataExporterInstance.cancelExport(filename);
+            res.json({
+                success,
+                message: success ? `Export ${filename} cancelled successfully` : 'Failed to cancel export'
+            });
+        } else {
+            res.status(404).json({
+                success: false,
+                error: 'No active exporter instance found'
+            });
+        }
+        
+    } catch (error) {
+        console.error('❌ Error cancelling export:', error);
+        res.status(500).json({ 
+            error: `Failed to cancel export: ${error.message}` 
+        });
+    }
+});
+
 // SQLite Export endpoint
 app.post('/api/export-sqlite', async (req, res) => {
     try {
@@ -632,42 +810,60 @@ app.post('/api/export-sqlite', async (req, res) => {
         
         // Ensure .db extension
         const dbFilename = filename.endsWith('.db') ? filename : `${filename}.db`;
-        const exportPath = path.join(__dirname, 'src', 'db', dbFilename);
         
-        console.log(`📤 Starting SQLite export to: ${exportPath}`);
+        console.log(`📤 Starting SQLite export to: ${dbFilename}`);
         
         // Default export options
         const exportOptions = {
             includeTickerData: options.includeTickerData !== false,
             includeHistorical: options.includeHistorical !== false,
-            historicalLimit: options.historicalLimit || 100000
+            activeOnly: options.activeOnly !== false, // Default to active only
+            historicalDays: options.historicalDays || null
         };
         
-        const result = await dbManager.exportToSQLite(exportPath, exportOptions);
+        console.log(`📤 Export Options:`, exportOptions);
+        
+        // Get the shared data exporter instance
+        const exporter = await getDataExporter();
+        
+        // Run the export using the data exporter
+        const result = await exporter.exportToSQLite(dbFilename, exportOptions);
+        
+        if (!result) {
+            return res.status(400).json({ 
+                error: 'SQLite export was cancelled' 
+            });
+        }
+        
+        console.log(`✅ SQLite export completed successfully: ${result.exportPath}`);
         
         res.json({
             success: true,
             message: `SQLite export completed successfully`,
-            result
+            exportPath: result.exportPath,
+            fileSizeMB: result.fileSizeMB,
+            exportedCounts: result.exportedCounts
         });
         
     } catch (error) {
-        console.error('❌ SQLite export error:', error);
+        console.error('❌ SQLite Export error:', error);
         res.status(500).json({ 
             error: `Failed to export to SQLite: ${error.message}` 
         });
     }
 });
 
+// Error handling for uncaught exceptions
+
 // Download endpoints
 app.get('/api/files', (req, res) => {
     try {
         const outputDir = path.join(__dirname, 'output');
-        const dbDir = path.join(__dirname, 'src', 'db');
+        const processingDir = path.join(__dirname, 'processing');
         
         const files = [];
         
-        // Check output files
+        // Check output files (completed exports)
         if (fs.existsSync(outputDir)) {
             const outputFiles = fs.readdirSync(outputDir);
             outputFiles.forEach(file => {
@@ -678,23 +874,25 @@ app.get('/api/files', (req, res) => {
                     path: `/api/download/output/${file}`,
                     size: stats.size,
                     modified: stats.mtime,
-                    type: 'output'
+                    type: 'output',
+                    status: 'completed'
                 });
             });
         }
         
-        // Check database files
-        if (fs.existsSync(dbDir)) {
-            const dbFiles = fs.readdirSync(dbDir).filter(file => file.endsWith('.db'));
-            dbFiles.forEach(file => {
-                const filePath = path.join(dbDir, file);
+        // Check processing files (exports in progress)
+        if (fs.existsSync(processingDir)) {
+            const processingFiles = fs.readdirSync(processingDir);
+            processingFiles.forEach(file => {
+                const filePath = path.join(processingDir, file);
                 const stats = fs.statSync(filePath);
                 files.push({
                     name: file,
-                    path: `/api/download/db/${file}`,
+                    path: `/api/download/processing/${file}`, // Note: this won't work until moved to output
                     size: stats.size,
                     modified: stats.mtime,
-                    type: 'database'
+                    type: 'processing',
+                    status: 'processing'
                 });
             });
         }
@@ -727,25 +925,36 @@ app.get('/api/download/output/:filename', (req, res) => {
     }
 });
 
-app.get('/api/download/db/:filename', (req, res) => {
+// Delete file endpoint
+app.delete('/api/delete-file', (req, res) => {
     try {
-        const filename = req.params.filename;
-        const filePath = path.join(__dirname, 'src', 'db', filename);
+        const { fileName } = req.body;
         
-        if (!fs.existsSync(filePath)) {
-            return res.status(404).json({ error: 'Database file not found' });
+        if (!fileName) {
+            return res.status(400).json({ error: 'Filename is required' });
         }
         
-        res.download(filePath, filename, (err) => {
-            if (err) {
-                console.error('Download error:', err);
-                if (!res.headersSent) {
-                    res.status(500).json({ error: 'Download failed' });
-                }
-            }
+        // Only allow deletion from output folder for security
+        const filePath = path.join(__dirname, 'output', fileName);
+        
+        // Check if file exists
+        if (!fs.existsSync(filePath)) {
+            return res.status(404).json({ error: 'File not found' });
+        }
+        
+        // Delete the file
+        fs.unlinkSync(filePath);
+        
+        console.log(`🗑️  File deleted: ${fileName}`);
+        
+        res.json({
+            success: true,
+            message: `File "${fileName}" deleted successfully`
         });
+        
     } catch (error) {
-        res.status(500).json({ error: error.message });
+        console.error('Delete file error:', error);
+        res.status(500).json({ error: `Failed to delete file: ${error.message}` });
     }
 });
 

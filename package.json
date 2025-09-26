@@ -4,6 +4,7 @@
   "description": "Bulk ticker generation and validation system with PostgreSQL database",
   "main": "index.js",
   "scripts": {
+    "start": "node --max-old-space-size=8192 server.js",
     "pipeline": "./scripts/pipeline.sh",
     "generate": "./scripts/generate.sh",
     "validate": "./scripts/validate.sh",

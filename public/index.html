@@ -28,6 +28,62 @@
             color: #28a745;
             font-weight: bold;
         }
+        .format-option {
+            margin-bottom: 0;
+            border: 2px solid #dee2e6;
+            border-radius: 8px;
+            padding: 15px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+        .format-option:hover {
+            border-color: #007bff;
+            background-color: #f8f9fa;
+        }
+        .format-option input[type="radio"]:checked + .format-label {
+            color: #007bff;
+            font-weight: 600;
+        }
+        .format-option input[type="radio"]:checked {
+            border-color: #007bff;
+        }
+        .format-label {
+            cursor: pointer;
+            width: 100%;
+            margin: 0;
+        }
+        .file-card {
+            border: 1px solid #dee2e6;
+            border-radius: 8px;
+            padding: 15px;
+            height: 100%;
+            transition: all 0.2s ease;
+            background-color: #fff;
+        }
+        .file-card:hover {
+            border-color: #007bff;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .file-icon {
+            font-size: 2rem;
+            margin-bottom: 10px;
+        }
+        .file-name {
+            font-weight: 600;
+            margin-bottom: 5px;
+            word-break: break-all;
+        }
+        .file-size {
+            color: #6c757d;
+            font-size: 0.875rem;
+        }
+        .file-actions {
+            margin-top: 10px;
+        }
+        .btn-file-action {
+            margin-right: 5px;
+            margin-bottom: 5px;
+        }
         .inactive-ticker {
             color: #6c757d;
         }
@@ -68,6 +124,13 @@
             0% { opacity: 1; }
             50% { opacity: 0.5; }
             100% { opacity: 1; }
+        }
+        .file-card.border-warning {
+            border-color: #ffc107 !important;
+            box-shadow: 0 0 0 0.2rem rgba(255, 193, 7, 0.25);
+        }
+        .file-card.border-warning .file-name {
+            color: #856404;
         }
     </style>
 </head>
@@ -115,11 +178,8 @@
                                 <button class="btn btn-info command-btn" data-command="gather" onclick="runCommand('gather')">
                                     <i class="fas fa-download"></i> Gather Data
                                 </button>
-                                <button class="btn btn-warning command-btn" data-command="export" onclick="runCommand('export')">
+                                <button class="btn btn-warning command-btn" onclick="showExportModal()">
                                     <i class="fas fa-file-export"></i> Export Data
-                                </button>
-                                <button class="btn btn-outline-warning command-btn" onclick="showSQLiteExportModal()">
-                                    <i class="fas fa-database"></i> Export SQLite
                                 </button>
                             </div>
                             <div class="col-md-6">
@@ -192,21 +252,10 @@
                         </button>
                     </div>
                     <div class="card-body">
-                        <div class="row">
-                            <div class="col-md-6">
-                                <h6><i class="fas fa-file-alt"></i> Output Files</h6>
-                                <div id="output-files" class="mb-3">
-                                    <div class="text-center text-muted">
-                                        <small>Loading files...</small>
-                                    </div>
-                                </div>
-                            </div>
-                            <div class="col-md-6">
-                                <h6><i class="fas fa-database"></i> Database Files</h6>
-                                <div id="database-files" class="mb-3">
-                                    <div class="text-center text-muted">
-                                        <small>Loading files...</small>
-                                    </div>
+                        <div id="files-container" style="max-height: 400px; overflow-y: auto;">
+                            <div class="row g-3" id="output-files">
+                                <div class="col-12 text-center text-muted">
+                                    <small>Loading files...</small>
                                 </div>
                             </div>
                         </div>
@@ -220,7 +269,12 @@
             <div class="col-md-12">
                 <div class="card">
                     <div class="card-header">
-                        <h5><i class="fas fa-list"></i> Ticker Browser</h5>
+                        <div class="d-flex justify-content-between align-items-center">
+                            <h5><i class="fas fa-list"></i> Ticker Browser</h5>
+                            <button class="btn btn-outline-primary btn-sm" onclick="refreshTickers()" id="refresh-btn">
+                                <i class="fas fa-sync-alt"></i> Refresh
+                            </button>
+                        </div>
                         <div class="row mt-3">
                             <div class="col-md-5">
                                 <label for="ticker-search" class="form-label">Search Tickers</label>
@@ -338,30 +392,81 @@
         </div>
     </div>
 
-    <!-- SQLite Export Modal -->
-    <div class="modal fade" id="sqliteExportModal" tabindex="-1" aria-labelledby="sqliteExportModalLabel" aria-hidden="true">
-        <div class="modal-dialog">
+    <!-- Unified Export Modal -->
+    <div class="modal fade" id="exportModal" tabindex="-1" aria-labelledby="exportModalLabel" aria-hidden="true">
+        <div class="modal-dialog modal-lg">
             <div class="modal-content">
                 <div class="modal-header">
-                    <h5 class="modal-title" id="sqliteExportModalLabel">
-                        <i class="fas fa-database text-warning"></i> Export to SQLite Database
+                    <h5 class="modal-title" id="exportModalLabel">
+                        <i class="fas fa-file-export text-warning"></i> Export Data
                     </h5>
                     <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
                 </div>
                 <div class="modal-body">
-                    <form id="sqliteExportForm">
-                        <div class="mb-3">
-                            <label for="sqlite-filename" class="form-label">Database Filename</label>
-                            <div class="input-group">
-                                <input type="text" class="form-control" id="sqlite-filename" 
-                                       placeholder="Enter filename" value="all-tickers-export" required>
-                                <span class="input-group-text">.db</span>
+                    <form id="exportForm">
+                        <!-- File Format Selection -->
+                        <div class="mb-4">
+                            <label class="form-label">Export Format</label>
+                            <div class="row g-2">
+                                <div class="col-md-4">
+                                    <div class="form-check format-option">
+                                        <input class="form-check-input" type="radio" name="exportFormat" id="format-json" value="json" checked>
+                                        <label class="form-check-label format-label" for="format-json">
+                                            <i class="fas fa-file-code text-success"></i>
+                                            <strong>JSON</strong>
+                                            <small class="d-block text-muted">Lightweight, readable format</small>
+                                        </label>
+                                    </div>
+                                </div>
+                                <div class="col-md-4">
+                                    <div class="form-check format-option">
+                                        <input class="form-check-input" type="radio" name="exportFormat" id="format-csv" value="csv">
+                                        <label class="form-check-label format-label" for="format-csv">
+                                            <i class="fas fa-file-csv text-primary"></i>
+                                            <strong>CSV</strong>
+                                            <small class="d-block text-muted">Spreadsheet compatible</small>
+                                        </label>
+                                    </div>
+                                </div>
+                                <div class="col-md-4">
+                                    <div class="form-check format-option">
+                                        <input class="form-check-input" type="radio" name="exportFormat" id="format-sqlite" value="sqlite">
+                                        <label class="form-check-label format-label" for="format-sqlite">
+                                            <i class="fas fa-database text-warning"></i>
+                                            <strong>SQLite</strong>
+                                            <small class="d-block text-muted">Database file</small>
+                                        </label>
+                                    </div>
+                                </div>
                             </div>
-                            <div class="form-text">File will be saved to the db/ folder</div>
                         </div>
                         
+                        <!-- Filename Input -->
                         <div class="mb-3">
+                            <label for="export-filename" class="form-label">Filename</label>
+                            <div class="input-group">
+                                <input type="text" class="form-control" id="export-filename" 
+                                       placeholder="Enter filename" value="all-tickers-export" required>
+                                <span class="input-group-text" id="file-extension">.json</span>
+                            </div>
+                            <div class="form-text" id="file-location">File will be saved to the output/ folder</div>
+                        </div>
+                        
+                        <!-- General Export Options -->
+                        <div class="mb-3" id="general-export-options">
                             <label class="form-label">Export Options</label>
+                            <div class="form-check">
+                                <input class="form-check-input" type="checkbox" id="active-only" checked>
+                                <label class="form-check-label" for="active-only">
+                                    <i class="fas fa-check-circle text-success"></i> Active Tickers Only
+                                    <small class="text-muted d-block">Export only active tickers and their data (faster, smaller file size)</small>
+                                </label>
+                            </div>
+                        </div>
+                        
+                        <!-- Export Options (for SQLite) -->
+                        <div class="mb-3" id="sqlite-options" style="display: none;">
+                            <label class="form-label">Additional SQLite Options</label>
                             <div class="form-check">
                                 <input class="form-check-input" type="checkbox" id="include-ticker-data" checked>
                                 <label class="form-check-label" for="include-ticker-data">
@@ -376,11 +481,64 @@
                             </div>
                         </div>
                         
-                        <div class="mb-3" id="historical-limit-section">
-                            <label for="historical-limit" class="form-label">Historical Records Limit</label>
-                            <input type="number" class="form-control" id="historical-limit" 
-                                   value="100000" min="1000" max="1000000">
-                            <div class="form-text">Limit historical records to avoid huge files (default: 100,000)</div>
+                        <!-- Time Range Selection -->
+                        <div class="mb-3" id="time-range-section">
+                            <label class="form-label">Historical Data Time Range</label>
+                            <div class="row g-2">
+                                <div class="col-md-6">
+                                    <button type="button" class="btn btn-outline-primary w-100 time-range-btn" data-days="7">
+                                        <i class="fas fa-calendar-day"></i> Last 7 Days
+                                    </button>
+                                </div>
+                                <div class="col-md-6">
+                                    <button type="button" class="btn btn-outline-primary w-100 time-range-btn" data-days="30">
+                                        <i class="fas fa-calendar-week"></i> Last 30 Days
+                                    </button>
+                                </div>
+                                <div class="col-md-6">
+                                    <button type="button" class="btn btn-outline-primary w-100 time-range-btn" data-days="90">
+                                        <i class="fas fa-calendar-alt"></i> Last 90 Days
+                                    </button>
+                                </div>
+                                <div class="col-md-6">
+                                    <button type="button" class="btn btn-outline-primary w-100 time-range-btn" data-days="180">
+                                        <i class="fas fa-calendar"></i> Last 6 Months
+                                    </button>
+                                </div>
+                                <div class="col-md-6">
+                                    <button type="button" class="btn btn-outline-primary w-100 time-range-btn" data-days="365">
+                                        <i class="fas fa-calendar-plus"></i> Last 1 Year
+                                    </button>
+                                </div>
+                                <div class="col-md-6">
+                                    <button type="button" class="btn btn-outline-primary w-100 time-range-btn" data-days="730">
+                                        <i class="fas fa-calendar-check"></i> Last 2 Years
+                                    </button>
+                                </div>
+                                <div class="col-md-6">
+                                    <button type="button" class="btn btn-outline-success w-100 time-range-btn" data-days="all">
+                                        <i class="fas fa-infinity"></i> All Data
+                                    </button>
+                                </div>
+                                <div class="col-md-6">
+                                    <button type="button" class="btn btn-outline-info w-100" onclick="showCustomDaysInput()">
+                                        <i class="fas fa-edit"></i> Custom Range
+                                    </button>
+                                </div>
+                            </div>
+                            <div id="custom-days-section" class="mt-3" style="display: none;">
+                                <div class="input-group">
+                                    <input type="number" class="form-control" id="custom-days" placeholder="Number of days" min="1" max="3650">
+                                    <span class="input-group-text">days back</span>
+                                    <button class="btn btn-primary" type="button" onclick="selectCustomDays()">
+                                        <i class="fas fa-check"></i> Apply
+                                    </button>
+                                </div>
+                            </div>
+                            <div class="form-text mt-2">
+                                <strong>Selected:</strong> <span id="selected-time-range">Last 30 Days</span>
+                                <input type="hidden" id="selected-historical-days" value="30">
+                            </div>
                         </div>
                     </form>
                     
@@ -389,7 +547,10 @@
                             <div class="spinner-border spinner-border-sm me-2" role="status">
                                 <span class="visually-hidden">Loading...</span>
                             </div>
-                            <span>Exporting database...</span>
+                            <span id="export-status">Preparing export...</span>
+                        </div>
+                        <div class="progress mt-2">
+                            <div class="progress-bar" role="progressbar" style="width: 0%" id="export-progress-bar"></div>
                         </div>
                     </div>
                     
@@ -398,8 +559,11 @@
                     </div>
                 </div>
                 <div class="modal-footer">
-                    <button type="button" class="btn btn-warning" id="start-export-btn" onclick="startSQLiteExport()">
-                        <i class="fas fa-database"></i> Start Export
+                    <button type="button" class="btn btn-warning" id="start-export-btn" onclick="startExport()">
+                        <i class="fas fa-file-export"></i> Start Export
+                    </button>
+                    <button type="button" class="btn btn-outline-danger" id="cancel-export-btn" onclick="cancelModalExport()" style="display: none;">
+                        <i class="fas fa-times"></i> Cancel Export
                     </button>
                     <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
                 </div>

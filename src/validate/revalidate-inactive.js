@@ -27,16 +27,16 @@ class InactiveTickerRevalidator {
         await this.ensureConnection();
         
         const result = await this.dbManager.query(`
-            SELECT symbol, exchange, price, last_updated as last_checked
+            SELECT symbol, exchanges, price, last_updated as last_checked
             FROM tickers 
             WHERE active = false
             ORDER BY last_updated ASC NULLS FIRST
         `);
         
         return result.rows.map(row => ({
-            ticker: `${row.symbol}.${row.exchange}`,
+            ticker: row.symbol, // Use just symbol since exchanges is an array
             price: row.price,
-            exchange: row.exchange,
+            exchanges: row.exchanges, // Keep full exchanges array
             last_checked: row.last_checked
         }));
     }
@@ -46,7 +46,7 @@ class InactiveTickerRevalidator {
         await this.ensureConnection();
         
         const result = await this.dbManager.query(`
-            SELECT symbol, exchange, price, last_updated as last_checked
+            SELECT symbol, exchanges, price, last_updated as last_checked
             FROM tickers 
             WHERE active = false 
                 AND (last_updated IS NULL OR last_updated < NOW() - INTERVAL '${daysSinceLastCheck} days')
@@ -54,9 +54,9 @@ class InactiveTickerRevalidator {
         `);
         
         return result.rows.map(row => ({
-            ticker: `${row.symbol}.${row.exchange}`,
+            ticker: row.symbol, // Use just symbol since exchanges is an array
             price: row.price,
-            exchange: row.exchange,
+            exchanges: row.exchanges, // Keep full exchanges array
             last_checked: row.last_checked
         }));
     }
@@ -102,7 +102,7 @@ class InactiveTickerRevalidator {
     // Validate an inactive ticker to see if it has become active again
     async validateInactiveTicker(tickerData) {
         try {
-            const symbol = tickerData.ticker.split('.')[0];
+            const symbol = tickerData.ticker; // ticker is now just the symbol
             
             // Use Yahoo Finance API to check if ticker is now active
             const url = `https://query1.finance.yahoo.com/v1/finance/search?q=${symbol}&lang=en-US&region=US&quotesCount=6&newsCount=4&listsCount=2&enableFuzzyQuery=false`;
@@ -121,14 +121,14 @@ class InactiveTickerRevalidator {
                 if (quote.symbol.toUpperCase() === symbol.toUpperCase() && 
                     (quote.regularMarketPrice || quote.ask || quote.bid)) {
                     
-                    const currentPrice = quote.regularMarketPrice || quote.ask || quote.bid || 0;
+                    const currentPrice = quote.regularMarketPrice || quote.ask || quote.bid;
                     
                     console.log(`🎉 Ticker ${tickerData.ticker} is now ACTIVE! Price: $${currentPrice}`);
                     return {
                         ticker: tickerData.ticker,
                         active: true,
                         price: currentPrice,
-                        exchange: quote.exchDisp || quote.exchange || tickerData.exchange,
+                        exchange: quote.exchDisp || quote.exchange || (tickerData.exchanges && tickerData.exchanges[0]) || 'UNKNOWN',
                         status_changed: true
                     };
                 }
@@ -139,7 +139,7 @@ class InactiveTickerRevalidator {
                 ticker: tickerData.ticker,
                 active: false,
                 price: tickerData.price,
-                exchange: tickerData.exchange,
+                exchange: (tickerData.exchanges && tickerData.exchanges[0]) || 'UNKNOWN',
                 status_changed: false
             };
 
@@ -151,7 +151,7 @@ class InactiveTickerRevalidator {
                 ticker: tickerData.ticker,
                 active: false,
                 price: tickerData.price,
-                exchange: tickerData.exchange,
+                exchange: (tickerData.exchanges && tickerData.exchanges[0]) || 'UNKNOWN',
                 status_changed: false,
                 error: error.message
             };
@@ -168,8 +168,8 @@ class InactiveTickerRevalidator {
 
         for (const result of results) {
             try {
-                const [symbol, exchange] = result.ticker.includes('.') ? 
-                    result.ticker.split('.') : [result.ticker, 'NYSE'];
+                const symbol = result.ticker; // ticker is now just the symbol
+                const exchange = result.exchange || 'UNKNOWN';
                 
                 await this.dbManager.updateTicker(symbol, {
                     active: result.active,
