@@ -97,199 +97,46 @@ create_database_and_user() {
 create_tables() {
     echo -e "${BLUE}🏗️  Creating database schema...${NC}"
     
-    PGPASSWORD=$DB_PASSWORD psql -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME << 'EOF'
--- Create tickers table
-CREATE TABLE IF NOT EXISTS tickers (
-    id SERIAL PRIMARY KEY,
-    symbol VARCHAR(10) NOT NULL UNIQUE,
-    exchanges TEXT[] NOT NULL DEFAULT '{}',
-    active BOOLEAN DEFAULT false,
-    price DECIMAL(10,4),
-    last_updated TIMESTAMP WITH TIME ZONE,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-);
-
--- Create ticker_quotes table
-CREATE TABLE IF NOT EXISTS ticker_quotes (
-    id SERIAL PRIMARY KEY,
-    ticker_id INTEGER NOT NULL REFERENCES tickers(id) ON DELETE CASCADE,
-    quote_time TIMESTAMP WITH TIME ZONE NOT NULL,
-    regular_market_price DECIMAL(12,4),
-    regular_market_change DECIMAL(12,4),
-    regular_market_change_percent DECIMAL(8,4),
-    regular_market_previous_close DECIMAL(12,4),
-    regular_market_open DECIMAL(12,4),
-    regular_market_day_low DECIMAL(12,4),
-    regular_market_day_high DECIMAL(12,4),
-    regular_market_volume BIGINT,
-    market_cap BIGINT,
-    shares_outstanding BIGINT,
-    float_shares BIGINT,
-    avg_daily_volume_3month BIGINT,
-    avg_daily_volume_10day BIGINT,
-    fifty_two_week_low DECIMAL(12,4),
-    fifty_two_week_high DECIMAL(12,4),
-    fifty_two_week_change DECIMAL(8,4),
-    beta DECIMAL(8,4),
-    forward_pe DECIMAL(8,4),
-    trailing_pe DECIMAL(8,4),
-    price_to_book DECIMAL(8,4),
-    price_to_sales_ttm DECIMAL(8,4),
-    enterprise_value BIGINT,
-    profit_margins DECIMAL(8,4),
-    enterprise_to_revenue DECIMAL(8,4),
-    enterprise_to_ebitda DECIMAL(8,4),
-    revenue_per_share DECIMAL(8,4),
-    debt_to_equity DECIMAL(8,4),
-    return_on_assets DECIMAL(8,4),
-    return_on_equity DECIMAL(8,4),
-    gross_profits BIGINT,
-    free_cashflow BIGINT,
-    operating_cashflow BIGINT,
-    earnings_growth DECIMAL(8,4),
-    revenue_growth DECIMAL(8,4),
-    gross_margins DECIMAL(8,4),
-    ebitda_margins DECIMAL(8,4),
-    operating_margins DECIMAL(8,4),
-    financial_currency VARCHAR(10),
-    trailing_annual_dividend_rate DECIMAL(8,4),
-    trailing_annual_dividend_yield DECIMAL(8,4),
-    dividend_rate DECIMAL(8,4),
-    dividend_yield DECIMAL(8,4),
-    payout_ratio DECIMAL(8,4),
-    book_value DECIMAL(8,4),
-    trailing_annual_dividend_yield DECIMAL(8,4),
-    eps_trailing_twelve_months DECIMAL(8,4),
-    eps_forward DECIMAL(8,4),
-    eps_current_year DECIMAL(8,4),
-    price_eps_current_year DECIMAL(8,4),
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    CONSTRAINT unique_ticker_quote_time UNIQUE(ticker_id, quote_time)
-);
-
--- Create ticker_metadata table
-CREATE TABLE IF NOT EXISTS ticker_metadata (
-    id SERIAL PRIMARY KEY,
-    ticker_id INTEGER NOT NULL REFERENCES tickers(id) ON DELETE CASCADE,
-    fetch_date TIMESTAMP WITH TIME ZONE NOT NULL,
-    data_source VARCHAR(100) DEFAULT 'Yahoo Finance API',
-    version VARCHAR(20) DEFAULT '2.0.0',
-    had_validation_warnings BOOLEAN DEFAULT false,
-    historical_start_date DATE,
-    historical_end_date DATE,
-    historical_record_count INTEGER DEFAULT 0,
-    summary_modules_count INTEGER DEFAULT 0,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    CONSTRAINT unique_ticker_fetch_date UNIQUE(ticker_id, fetch_date)
-);
-
--- Create ticker_historical table
-CREATE TABLE IF NOT EXISTS ticker_historical (
-    id SERIAL PRIMARY KEY,
-    ticker_id INTEGER NOT NULL REFERENCES tickers(id) ON DELETE CASCADE,
-    trade_date DATE NOT NULL,
-    open_price DECIMAL(12,4),
-    high_price DECIMAL(12,4),
-    low_price DECIMAL(12,4),
-    close_price DECIMAL(12,4),
-    adj_close_price DECIMAL(12,4),
-    volume BIGINT,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    CONSTRAINT unique_ticker_trade_date UNIQUE(ticker_id, trade_date)
-);
-
--- Create ticker_financials table (optional for financial data)
-CREATE TABLE IF NOT EXISTS ticker_financials (
-    id SERIAL PRIMARY KEY,
-    ticker_id INTEGER NOT NULL REFERENCES tickers(id) ON DELETE CASCADE,
-    data_date DATE NOT NULL,
-    total_cash BIGINT,
-    total_debt BIGINT,
-    total_revenue BIGINT,
-    debt_to_equity DECIMAL(8,4),
-    return_on_equity DECIMAL(8,4),
-    return_on_assets DECIMAL(8,4),
-    free_cashflow BIGINT,
-    operating_cashflow BIGINT,
-    earnings_growth DECIMAL(8,4),
-    revenue_growth DECIMAL(8,4),
-    gross_margins DECIMAL(8,4),
-    operating_margins DECIMAL(8,4),
-    profit_margins DECIMAL(8,4),
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    CONSTRAINT unique_ticker_financial_date UNIQUE(ticker_id, data_date)
-);
-
-EOF
-
-    if [ $? -eq 0 ]; then
-        echo -e "${GREEN}✅ Database schema created successfully${NC}"
-    else
-        echo -e "${RED}❌ Failed to create database schema${NC}"
-        exit 1
-    fi
-}
-
-# Function to create indexes for performance
-create_indexes() {
-    echo -e "${BLUE}📊 Creating performance indexes...${NC}"
+    # Check if schema.sql exists
+    SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
+    SCHEMA_FILE="$SCRIPT_DIR/../schema.sql"
     
-    PGPASSWORD=$DB_PASSWORD psql -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME << 'EOF'
--- Indexes for tickers table
-CREATE INDEX IF NOT EXISTS idx_tickers_symbol ON tickers(symbol);
-CREATE INDEX IF NOT EXISTS idx_tickers_exchanges ON tickers USING GIN(exchanges);
-CREATE INDEX IF NOT EXISTS idx_tickers_active ON tickers(active);
-CREATE INDEX IF NOT EXISTS idx_tickers_last_updated ON tickers(last_updated);
-
--- Indexes for ticker_quotes table
-CREATE INDEX IF NOT EXISTS idx_ticker_quotes_ticker_id ON ticker_quotes(ticker_id);
-CREATE INDEX IF NOT EXISTS idx_ticker_quotes_quote_time ON ticker_quotes(quote_time);
-CREATE INDEX IF NOT EXISTS idx_ticker_quotes_ticker_time ON ticker_quotes(ticker_id, quote_time);
-
--- Indexes for ticker_metadata table
-CREATE INDEX IF NOT EXISTS idx_ticker_metadata_ticker_id ON ticker_metadata(ticker_id);
-CREATE INDEX IF NOT EXISTS idx_ticker_metadata_fetch_date ON ticker_metadata(fetch_date);
-
--- Indexes for ticker_historical table
-CREATE INDEX IF NOT EXISTS idx_ticker_historical_ticker_id ON ticker_historical(ticker_id);
-CREATE INDEX IF NOT EXISTS idx_ticker_historical_trade_date ON ticker_historical(trade_date);
-CREATE INDEX IF NOT EXISTS idx_ticker_historical_ticker_date ON ticker_historical(ticker_id, trade_date);
-
--- Indexes for ticker_financials table
-CREATE INDEX IF NOT EXISTS idx_ticker_financials_ticker_id ON ticker_financials(ticker_id);
-CREATE INDEX IF NOT EXISTS idx_ticker_financials_data_date ON ticker_financials(data_date);
-
-EOF
-
-    if [ $? -eq 0 ]; then
-        echo -e "${GREEN}✅ Performance indexes created successfully${NC}"
+    if [ -f "$SCHEMA_FILE" ]; then
+        echo -e "${GREEN}📄 Using comprehensive schema file: schema.sql${NC}"
+        PGPASSWORD=$DB_PASSWORD psql -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME -f "$SCHEMA_FILE"
+        
+        if [ $? -eq 0 ]; then
+            echo -e "${GREEN}✅ Database schema created successfully from schema.sql${NC}"
+        else
+            echo -e "${RED}❌ Failed to create database schema from schema.sql${NC}"
+            exit 1
+        fi
     else
-        echo -e "${RED}❌ Failed to create performance indexes${NC}"
+        echo -e "${RED}❌ Schema file not found: $SCHEMA_FILE${NC}"
+        echo -e "${YELLOW}Expected to find schema.sql in project root${NC}"
         exit 1
     fi
 }
 
 # Function to install stored procedures
 install_stored_procedures() {
-    echo -e "${BLUE}⚙️  Installing stored procedures...${NC}"
+    echo -e "${BLUE}⚙️  Installing additional stored procedures...${NC}"
     
-    # Check if the stored procedures file exists
+    # Check if the additional stored procedures file exists
     SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
     FUNCTIONS_FILE="$SCRIPT_DIR/create-array-functions.sql"
     
     if [ -f "$FUNCTIONS_FILE" ]; then
-        echo -e "${GREEN}📄 Found stored procedures file: $FUNCTIONS_FILE${NC}"
+        echo -e "${GREEN}📄 Found additional stored procedures file: $FUNCTIONS_FILE${NC}"
         PGPASSWORD=$DB_PASSWORD psql -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME -f "$FUNCTIONS_FILE"
         
         if [ $? -eq 0 ]; then
-            echo -e "${GREEN}✅ Stored procedures installed successfully${NC}"
+            echo -e "${GREEN}✅ Additional stored procedures installed successfully${NC}"
         else
-            echo -e "${YELLOW}⚠️  Some stored procedures may have failed to install${NC}"
+            echo -e "${YELLOW}⚠️  Some additional stored procedures may have failed to install${NC}"
         fi
     else
-        echo -e "${YELLOW}⚠️  Stored procedures file not found: $FUNCTIONS_FILE${NC}"
-        echo -e "${YELLOW}   Stored procedures can be installed later using:${NC}"
-        echo -e "${YELLOW}   PGPASSWORD=\$DB_PASSWORD psql -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME -f create-array-functions.sql${NC}"
+        echo -e "${BLUE}ℹ️  Additional stored procedures file not found (schema.sql includes core functions)${NC}"
     fi
 }
 
@@ -404,7 +251,6 @@ main() {
     check_postgresql_server
     create_database_and_user
     create_tables
-    create_indexes
     install_stored_procedures
     create_env_template
     verify_installation

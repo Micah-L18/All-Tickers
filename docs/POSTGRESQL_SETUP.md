@@ -68,9 +68,11 @@ The script creates optimized indexes for:
 ```
 All-Tickers/
 ├── .env                           # Database configuration
+├── schema.sql                     # Complete database schema
 ├── scripts/
 │   ├── setup-postgresql.sh       # Main setup script
-│   └── create-array-functions.sql # Stored procedures
+│   ├── validate-postgresql.sh    # Validation script
+│   └── create-array-functions.sql # Additional stored procedures
 └── src/db/
     └── database-manager.js       # Database connection manager
 ```
@@ -96,27 +98,24 @@ GRANT ALL PRIVILEGES ON DATABASE all_tickers TO all_tickers_user;
 
 ### 2. Create Tables
 
-Connect to your database:
+The setup script automatically uses the comprehensive `schema.sql` file:
+
 ```bash
-PGPASSWORD='your_password' psql -h localhost -U all_tickers_user -d all_tickers
+PGPASSWORD='your_password' psql -h localhost -U all_tickers_user -d all_tickers -f schema.sql
 ```
 
-Run the table creation commands from the setup script or execute:
-```sql
--- See setup-postgresql.sh for complete table definitions
--- Core tables: tickers, ticker_quotes, ticker_metadata, ticker_historical
-```
+This creates all tables, indexes, stored procedures, and views in one step.
 
-### 3. Create Indexes
-```sql
--- Performance indexes for efficient queries
-CREATE INDEX idx_tickers_symbol ON tickers(symbol);
-CREATE INDEX idx_tickers_exchanges ON tickers USING GIN(exchanges);
-CREATE INDEX idx_tickers_active ON tickers(active);
--- See setup script for complete index list
-```
+### 3. Schema Applied Automatically
 
-### 4. Install Stored Procedures
+The `schema.sql` file includes:
+- All core tables with proper constraints
+- 20+ performance indexes 
+- Stored procedures for data management
+- Views for common queries
+- Database maintenance functions
+
+### 4. Additional Stored Procedures (Optional)
 ```bash
 PGPASSWORD='your_password' psql -h localhost -U all_tickers_user -d all_tickers -f scripts/create-array-functions.sql
 ```
@@ -153,17 +152,19 @@ After setup completion:
    npm start
    ```
 
-2. **Generate ticker combinations:**
-   ```bash
-   node src/db/generate-tickers.js
-   ```
-
-3. **Access the web interface:**
+2. **Access the web interface:**
    ```
    http://localhost:3000
    ```
 
-4. **Begin data collection and exports**
+3. **Generate ticker combinations:**
+   - Click the **"Generate Tickers"** button in the web interface
+   - This will populate your database with millions of ticker combinations (A-ZZZZZ × 3 exchanges)
+   - The process takes 10-30 minutes depending on your system
+
+4. **Begin ticker validation and data collection:**
+   - Use the **"Validate Tickers"** button to start checking ticker validity
+   - Use the **"Gather Data"** button to collect market data for valid tickers
 
 ## 🔒 Security Notes
 
