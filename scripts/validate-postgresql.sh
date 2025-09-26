@@ -15,7 +15,7 @@ NC='\033[0m' # No Color
 # Load environment variables
 if [ -f "../.env" ]; then
     set -o allexport
-    source ../.env
+    . ../.env
     set +o allexport
     echo -e "${GREEN}✅ Loaded environment variables from .env${NC}"
 else
@@ -153,11 +153,11 @@ EOF
 
 # Test 7: Performance Test
 echo -e "${BLUE}Test 7: Performance Test${NC}"
-START_TIME=$(date +%s%3N)
+START_TIME=$(python3 -c "import time; print(int(time.time() * 1000))" 2>/dev/null || date +%s000)
 PGPASSWORD=$DB_PASSWORD psql -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME -c "
     SELECT COUNT(*) FROM tickers WHERE active = true;
 " > /dev/null 2>&1
-END_TIME=$(date +%s%3N)
+END_TIME=$(python3 -c "import time; print(int(time.time() * 1000))" 2>/dev/null || date +%s000)
 QUERY_TIME=$((END_TIME - START_TIME))
 echo -e "${GREEN}✅ Index query completed in ${QUERY_TIME}ms${NC}"
 
