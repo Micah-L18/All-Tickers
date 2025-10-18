@@ -1,11 +1,11 @@
-const PostgreSQLManager = require('../db/database-manager');
+const DatabaseFactory = require('../db/database-factory');
 const fs = require('fs');
 const path = require('path');
 require('dotenv').config();
 
 class TickerExporter {
     constructor() {
-        this.dbManager = new PostgreSQLManager();
+        this.dbManager = DatabaseFactory.createDatabaseManager();
         this.outputDir = path.join(__dirname, '..', '..', 'output');
         this.resultsPath = path.join(this.outputDir, 'results.json');
         this.activeTickersPath = path.join(this.outputDir, 'active_tickers.json');
@@ -22,7 +22,7 @@ class TickerExporter {
         await this.dbManager.connect();
     }
 
-    // Get all tickers from PostgreSQL database
+    // Get all tickers from SQLite database
     async getAllTickers() {
         const result = await this.dbManager.query(`
             SELECT CONCAT(symbol, '.', exchange) as ticker, active, price, exchange
@@ -119,7 +119,7 @@ class TickerExporter {
                 metadata: {
                     exportDate: new Date().toISOString(),
                     exportTimestamp: Date.now(),
-                    database: 'PostgreSQL',
+                    database: 'SQLite',
                     source: 'All-Tickers Project',
                     version: '2.0.0'
                 },
@@ -174,7 +174,7 @@ class TickerExporter {
                 metadata: {
                     exportDate: new Date().toISOString(),
                     exportTimestamp: Date.now(),
-                    database: 'PostgreSQL',
+                    database: 'SQLite',
                     type: 'Active Tickers Only',
                     source: 'All-Tickers Project',
                     version: '2.0.0'
@@ -229,7 +229,7 @@ class TickerExporter {
                 metadata: {
                     exportDate: new Date().toISOString(),
                     exportTimestamp: Date.now(),
-                    database: 'PostgreSQL',
+                    database: 'SQLite',
                     type: 'Delisted/Inactive Tickers Only',
                     source: 'All-Tickers Project',
                     version: '2.0.0'
@@ -332,7 +332,7 @@ class TickerExporter {
             
             const checkpoint = {
                 timestamp: new Date().toISOString(),
-                database: 'PostgreSQL',
+                database: 'SQLite',
                 version: '2.0.0',
                 status: 'operational',
                 statistics: {
@@ -371,7 +371,7 @@ async function main() {
         const exporter = new TickerExporter();
         
         try {
-            console.log('📤 Ticker Exporter - PostgreSQL Edition');
+            console.log('📤 Ticker Exporter - SQLite Edition');
             console.log('=' .repeat(50));
             
             await exporter.initialize();

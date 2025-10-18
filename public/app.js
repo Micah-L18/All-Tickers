@@ -7,6 +7,122 @@ let progressPollingInterval = null;
 // Global state for exports
 let activeExports = new Map(); // Track files currently being exported with format info
 
+// Password modal state
+let passwordModalResolve = null;
+let passwordModalReject = null;
+let passwordModal = null;
+
+// Alert modal state
+let alertModal = null;
+
+// Function to show alert modal (replacement for alert())
+function showAlert(message, title = 'Notice', type = 'info') {
+    // Set the title
+    document.getElementById('alertModalTitle').textContent = title;
+    
+    // Set the message (can include HTML)
+    document.getElementById('alertModalBody').innerHTML = message;
+    
+    // Set icon and header color based on type
+    const header = document.getElementById('alertModalHeader');
+    const icon = document.getElementById('alertModalIcon');
+    
+    // Reset classes
+    header.className = 'modal-header';
+    
+    switch(type) {
+        case 'success':
+            header.classList.add('bg-success', 'text-white');
+            icon.className = 'fas fa-check-circle';
+            break;
+        case 'error':
+        case 'danger':
+            header.classList.add('bg-danger', 'text-white');
+            icon.className = 'fas fa-exclamation-circle';
+            break;
+        case 'warning':
+            header.classList.add('bg-warning');
+            icon.className = 'fas fa-exclamation-triangle';
+            break;
+        case 'info':
+        default:
+            header.classList.add('bg-info', 'text-white');
+            icon.className = 'fas fa-info-circle';
+            break;
+    }
+    
+    // Show the modal
+    if (!alertModal) {
+        alertModal = new bootstrap.Modal(document.getElementById('alertModal'));
+    }
+    alertModal.show();
+}
+
+// Function to show password modal and return a promise
+function showPasswordModal(operationText = 'Please enter the access code to continue.') {
+    return new Promise((resolve, reject) => {
+        passwordModalResolve = resolve;
+        passwordModalReject = reject;
+        
+        // Update the operation text
+        document.getElementById('password-operation-text').innerHTML = `<small>${operationText}</small>`;
+        
+        // Clear previous input and errors
+        document.getElementById('access-code-input').value = '';
+        document.getElementById('password-error').style.display = 'none';
+        
+        // Show the modal
+        if (!passwordModal) {
+            passwordModal = new bootstrap.Modal(document.getElementById('passwordModal'));
+        }
+        passwordModal.show();
+        
+        // Focus on input after modal is shown
+        document.getElementById('passwordModal').addEventListener('shown.bs.modal', function () {
+            document.getElementById('access-code-input').focus();
+        }, { once: true });
+    });
+}
+
+// Handle password submission
+function submitPassword() {
+    const enteredCode = document.getElementById('access-code-input').value;
+    const correctCode = '007';
+    
+    if (enteredCode === correctCode) {
+        // Correct password
+        if (passwordModal) {
+            passwordModal.hide();
+        }
+        if (passwordModalResolve) {
+            passwordModalResolve(true);
+        }
+    } else {
+        // Wrong password
+        document.getElementById('password-error').style.display = 'block';
+        document.getElementById('access-code-input').value = '';
+        document.getElementById('access-code-input').focus();
+    }
+}
+
+// Handle cancel
+function cancelPasswordPrompt() {
+    if (passwordModal) {
+        passwordModal.hide();
+    }
+    if (passwordModalReject) {
+        passwordModalReject(false);
+    }
+}
+
+// Handle Enter key press in password input
+function handlePasswordKeypress(event) {
+    if (event.key === 'Enter') {
+        event.preventDefault();
+        submitPassword();
+    }
+}
+
 // Helper function to format timestamps as "time ago"
 function formatTimeAgo(timestamp) {
     const now = new Date();
@@ -496,6 +612,27 @@ function updatePagination(totalItems, currentPage, itemsPerPage, viewType = 'tic
 }
 
 async function runCommand(command) {
+    // Commands that require password protection
+    const protectedCommands = ['generate', 'validate', 'gather', 'monitor'];
+    
+    // Check if this command requires password
+    if (protectedCommands.includes(command)) {
+        try {
+            const commandNames = {
+                'generate': 'Generate Tickers',
+                'validate': 'Validate Tickers',
+                'gather': 'Gather Data',
+                'monitor': 'Auto Monitor'
+            };
+            const operationText = `You are about to run: <strong>${commandNames[command]}</strong><br>Please enter the access code to continue.`;
+            
+            await showPasswordModal(operationText);
+        } catch (error) {
+            // User cancelled or wrong password
+            return;
+        }
+    }
+    
     // Check if the specific command is already running
     try {
         const statusResponse = await fetch('/api/status');
@@ -504,7 +641,11 @@ async function runCommand(command) {
         if (statusData.runningProcesses && statusData.runningProcesses.length > 0) {
             const runningCommand = statusData.runningProcesses.find(proc => proc.command === command);
             if (runningCommand) {
-                alert(`The ${command} command is already running (started ${runningCommand.duration} ago). Please wait for it to complete.`);
+                showAlert(
+                    `The <strong>${command}</strong> command is already running (started ${runningCommand.duration} ago).<br><br>Please wait for it to complete.`,
+                    'Command Already Running',
+                    'warning'
+                );
                 return;
             }
         }
@@ -513,7 +654,11 @@ async function runCommand(command) {
     }
     
     if (isCommandRunning) {
-        alert('A command is already running. Please wait for it to complete.');
+        showAlert(
+            'A command is currently running.<br><br>Please wait for it to complete before starting another.',
+            'Command In Progress',
+            'warning'
+        );
         return;
     }
     
@@ -839,7 +984,11 @@ function updateModalProgress(progress) {
 function downloadFile(filePath, fileName) {
     // Check if file is currently being exported
     if (activeExports.has(fileName)) {
-        alert('This file is currently being exported. Please wait for the export to complete.');
+        showAlert(
+            'This file is currently being exported.<br><br>Please wait for the export to complete.',
+            'Export In Progress',
+            'warning'
+        );
         return;
     }
     
@@ -855,7 +1004,11 @@ function downloadFile(filePath, fileName) {
 async function deleteFile(fileName, filePath) {
     // Check if file is currently being exported
     if (activeExports.has(fileName)) {
-        alert('This file is currently being exported. Please wait for the export to complete before deleting.');
+        showAlert(
+            'This file is currently being exported.<br><br>Please wait for the export to complete before deleting.',
+            'Export In Progress',
+            'warning'
+        );
         return;
     }
     
@@ -882,14 +1035,25 @@ async function deleteFile(fileName, filePath) {
             // Refresh the file list
             loadFiles();
             
-            // Show success message (optional)
-            // You could add a toast notification here if desired
+            showAlert(
+                `File "<strong>${fileName}</strong>" has been deleted successfully.`,
+                'File Deleted',
+                'success'
+            );
         } else {
-            alert(`Failed to delete file: ${data.error}`);
+            showAlert(
+                `Failed to delete file:<br><br>${data.error}`,
+                'Delete Failed',
+                'error'
+            );
         }
         
     } catch (error) {
-        alert(`Error deleting file: ${error.message}`);
+        showAlert(
+            `Error deleting file:<br><br>${error.message}`,
+            'Error',
+            'error'
+        );
     }
 }
 
@@ -934,12 +1098,20 @@ async function sendInput() {
     const input = inputField.value.trim();
     
     if (!input) {
-        alert('Please enter a value');
+        showAlert(
+            'Please enter a value before submitting.',
+            'Input Required',
+            'warning'
+        );
         return;
     }
     
     if (!currentProcessId) {
-        alert('No active process to send input to');
+        showAlert(
+            'No active process to send input to.',
+            'No Active Process',
+            'warning'
+        );
         return;
     }
     
@@ -967,10 +1139,18 @@ async function sendInput() {
             outputDiv.textContent += `\n>>> ${input}\n`;
             outputDiv.scrollTop = outputDiv.scrollHeight;
         } else {
-            alert(`Error: ${result.error}`);
+            showAlert(
+                `Error sending input:<br><br>${result.error}`,
+                'Error',
+                'error'
+            );
         }
     } catch (error) {
-        alert(`Failed to send input: ${error.message}`);
+        showAlert(
+            `Failed to send input:<br><br>${error.message}`,
+            'Error',
+            'error'
+        );
     }
 }
 
@@ -990,7 +1170,16 @@ function clearOutput() {
 let currentModalProcessId = null;
 let modalUpdateInterval = null;
 
-function showProcessDetails(processId, command, formattedDuration, startTime) {
+async function showProcessDetails(processId, command, formattedDuration, startTime) {
+    // Require password to view process details
+    try {
+        const operationText = `You are about to view details for: <strong>${command}</strong><br>Please enter the access code to continue.`;
+        await showPasswordModal(operationText);
+    } catch (error) {
+        // User cancelled or wrong password
+        return;
+    }
+    
     // Store current process ID for updates
     currentModalProcessId = processId;
     
@@ -1093,7 +1282,11 @@ async function confirmKillProcess() {
         const data = await response.json();
         
         if (response.ok) {
-            alert(`Process stopped successfully: ${data.message}`);
+            showAlert(
+                `Process stopped successfully:<br><br>${data.message}`,
+                'Process Stopped',
+                'success'
+            );
             
             // Close the modal
             const modal = bootstrap.Modal.getInstance(document.getElementById('processDetailsModal'));
@@ -1102,10 +1295,18 @@ async function confirmKillProcess() {
             // Refresh system status
             loadSystemStatus();
         } else {
-            alert(`Failed to stop process: ${data.error}`);
+            showAlert(
+                `Failed to stop process:<br><br>${data.error}`,
+                'Stop Failed',
+                'error'
+            );
         }
     } catch (error) {
-        alert(`Error stopping process: ${error.message}`);
+        showAlert(
+            `Error stopping process:<br><br>${error.message}`,
+            'Error',
+            'error'
+        );
     }
 }
 
@@ -1316,7 +1517,11 @@ function showCustomDaysInput() {
 function selectCustomDays() {
     const customDays = parseInt(document.getElementById('custom-days').value);
     if (!customDays || customDays < 1) {
-        alert('Please enter a valid number of days (minimum 1)');
+        showAlert(
+            'Please enter a valid number of days (minimum 1).',
+            'Invalid Input',
+            'warning'
+        );
         return;
     }
     
@@ -1343,7 +1548,11 @@ async function startExport() {
     const activeOnly = document.getElementById('active-only').checked;
     
     if (!filename) {
-        alert('Please enter a filename');
+        showAlert(
+            'Please enter a filename before starting the export.',
+            'Filename Required',
+            'warning'
+        );
         return;
     }
     
@@ -1511,7 +1720,11 @@ let currentModalExportFilename = null; // Track current modal export for cancell
 
 async function cancelModalExport() {
     if (!currentModalExportFilename) {
-        alert('No active export to cancel');
+        showAlert(
+            'No active export to cancel.',
+            'No Export Running',
+            'info'
+        );
         return;
     }
     

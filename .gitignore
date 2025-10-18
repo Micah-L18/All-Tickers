@@ -3,6 +3,6 @@ output/
 src/db/*.db
 testing
 test-db-viewer/
-postgresql-sample/
 processing/
 ignore/
+*.db

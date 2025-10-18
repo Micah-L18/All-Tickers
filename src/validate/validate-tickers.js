@@ -1,10 +1,11 @@
-const PostgreSQLManager = require('../db/database-manager');
+const { createDatabaseManager } = require('../db/database-factory');
 const axios = require('axios');
 const { RateLimitError, isRateLimitError, handleRateLimitError } = require('../return-data/return-data');
+const yahooFinance = require('yahoo-finance2').default;
 
 class FastTickerValidator {
     constructor() {
-        this.dbManager = new PostgreSQLManager();
+        this.dbManager = null; // Will be initialized in initDatabase
         // Using the same high-performance settings from the old validator
         this.batchSize = 500; // Increased batch size
         this.delayMs = 200; // Reduced delay
@@ -28,8 +29,8 @@ class FastTickerValidator {
     }
 
     async initialize() {
-        await this.dbManager.connect();
-        console.log('✅ PostgreSQL connection established');
+        this.dbManager = await createDatabaseManager();
+        console.log('✅ SQLite connection established');
     }
 
     // Get random user agent for each request
@@ -44,9 +45,8 @@ class FastTickerValidator {
             const query = `
                 SELECT symbol 
                 FROM tickers 
-                WHERE active = true 
-                    AND price IS NOT NULL 
-                    AND last_updated > NOW() - INTERVAL '7 days'
+                WHERE active = 1 
+                    AND updated_at > datetime('now', '-7 days')
                 ORDER BY RANDOM() 
                 LIMIT 5
             `;
@@ -159,15 +159,105 @@ class FastTickerValidator {
 
     // Update ticker status in database
     async updateTickerStatus(symbol, active, price = null) {
-        const query = 'UPDATE tickers SET active = $1, price = $2, last_updated = CURRENT_TIMESTAMP WHERE symbol = $3';
-        await this.dbManager.query(query, [active, price, symbol]);
+        const query = 'UPDATE tickers SET active = ? WHERE symbol = ?';
+        await this.dbManager.query(query, [active, symbol]);
+    }
+
+    // Fetch historical data for active tickers
+    async fetchHistoricalDataForTicker(symbol) {
+        try {
+            console.log(`📈 Fetching historical data for ${symbol}...`);
+            
+            let quote = null;
+            
+            // Try to get comprehensive ticker data (quote may fail, so continue with historical even if it does)
+            try {
+                quote = await yahooFinance.quoteSummary(symbol, {
+                    modules: ['price', 'summaryDetail', 'defaultKeyStatistics']
+                });
+            } catch (quoteError) {
+                // Silently continue - quote is optional
+            }
+
+            // Try to fetch historical data, falling back to shorter periods if necessary
+            let historicalData = null;
+            const fallbackPeriods = [
+                '1900-01-01',  // Try full history first
+                '1950-01-01',  // Fall back to 1950
+                '1970-01-01',  // Fall back to 1970
+                '1990-01-01',  // Fall back to 1990
+                '2000-01-01'   // Fall back to 2000
+            ];
+            
+            for (const startDate of fallbackPeriods) {
+                try {
+                    historicalData = await yahooFinance.historical(symbol, {
+                        period1: startDate,
+                        period2: new Date().toISOString().split('T')[0],
+                        interval: '1d'
+                    });
+                    
+                    if (historicalData && historicalData.length > 0) {
+                        break; // Success! Exit the loop
+                    }
+                } catch (histError) {
+                    // If it's a "data not available" error, try next fallback
+                    if (histError.message && histError.message.includes('data not available')) {
+                        continue; // Try next fallback period
+                    }
+                    // For other errors, throw to outer catch
+                    throw histError;
+                }
+            }
+
+            // Store the quote data if available
+            if (quote && quote.price) {
+                try {
+                    await this.dbManager.upsertQuote({
+                        symbol: symbol,
+                        current_price: quote.price.regularMarketPrice,
+                        previous_close: quote.price.regularMarketPreviousClose,
+                        open_price: quote.price.regularMarketOpen,
+                        bid: quote.summaryDetail?.bid,
+                        ask: quote.summaryDetail?.ask,
+                        days_range: quote.price.regularMarketDayRange,
+                        weeks_52_range: quote.summaryDetail?.fiftyTwoWeekRange,
+                        volume: quote.price.regularMarketVolume,
+                        avg_volume: quote.price.averageDailyVolume10Day,
+                        market_cap: quote.price.marketCap,
+                        beta: quote.summaryDetail?.beta,
+                        pe_ratio: quote.summaryDetail?.trailingPE,
+                        eps: quote.defaultKeyStatistics?.trailingEps,
+                        earnings_date: null,
+                        dividend_yield: quote.summaryDetail?.dividendYield,
+                        ex_dividend_date: quote.summaryDetail?.exDividendDate ? new Date(quote.summaryDetail.exDividendDate * 1000).toISOString() : null,
+                        year_target_est: quote.summaryDetail?.targetMeanPrice
+                    });
+                } catch (dbError) {
+                    // Silently continue - quote storage is optional
+                }
+            }
+
+            // Store historical data
+            if (historicalData && historicalData.length > 0) {
+                await this.dbManager.upsertHistoricalData(symbol, historicalData);
+                console.log(`✅ Stored ${historicalData.length} historical records for ${symbol}`);
+            } else {
+                console.log(`⚠️  No historical data available for ${symbol}`);
+            }
+
+            return { success: true, recordCount: historicalData ? historicalData.length : 0 };
+        } catch (error) {
+            console.error(`❌ Error fetching historical data for ${symbol}:`, error.message);
+            return { success: false, error: error.message };
+        }
     }
 
     // Validate a single ticker (for API endpoint)
     async validateSingleTicker(symbol) {
         try {
             // Ensure database connection
-            if (!this.dbManager || !this.dbManager.isConnected) {
+            if (!this.dbManager) {
                 await this.initialize();
             }
 
@@ -215,18 +305,32 @@ class FastTickerValidator {
     async bulkUpdateTickersAttempt(tickerResults) {
         let completed = 0;
         let errors = 0;
+        let historicalDataFetched = 0;
 
         for (const { symbol, data } of tickerResults) {
             try {
+                // Update ticker status
                 await this.updateTickerStatus(symbol, data.active, data.price);
                 completed++;
+
+                // If ticker is active, fetch historical data
+                if (data.active) {
+                    console.log(`🔍 ${symbol} is active, fetching historical data...`);
+                    const historicalResult = await this.fetchHistoricalDataForTicker(symbol);
+                    if (historicalResult.success) {
+                        historicalDataFetched++;
+                    }
+                    
+                    // Add small delay between data fetches to avoid rate limiting
+                    await new Promise(resolve => setTimeout(resolve, 100));
+                }
             } catch (error) {
                 errors++;
                 console.error(`❌ Error updating ${symbol}:`, error.message);
             }
         }
 
-        return { completed, errors };
+        return { completed, errors, historicalDataFetched };
     }
 
     // Process batch with concurrent validation like old validator
@@ -315,7 +419,7 @@ class FastTickerValidator {
 
 // Main execution function
 async function main() {
-    console.log('⚡ Fast Ticker Validator - PostgreSQL Edition');
+    console.log('⚡ Fast Ticker Validator - SQLite Edition');
     console.log('============================================');
     
     const validator = new FastTickerValidator();

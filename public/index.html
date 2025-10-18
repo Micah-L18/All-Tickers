@@ -167,7 +167,7 @@
                     </div>
                     <div class="card-body">
                         <div class="row">
-                            <div class="col-md-6">
+                            <div class="col-md-12">
                                 <h6>Core Operations</h6>
                                 <button class="btn btn-primary command-btn" data-command="generate" onclick="runCommand('generate')">
                                     <i class="fas fa-database"></i> Generate Tickers
@@ -181,20 +181,8 @@
                                 <button class="btn btn-warning command-btn" onclick="showExportModal()">
                                     <i class="fas fa-file-export"></i> Export Data
                                 </button>
-                            </div>
-                            <div class="col-md-6">
-                                <h6>Maintenance</h6>
-                                <button class="btn btn-secondary command-btn" data-command="revalidate-active" onclick="runCommand('revalidate-active')">
-                                    <i class="fas fa-sync"></i> Revalidate Active
-                                </button>
-                                <button class="btn btn-secondary command-btn" data-command="revalidate-inactive" onclick="runCommand('revalidate-inactive')">
-                                    <i class="fas fa-redo"></i> Revalidate Inactive
-                                </button>
-                                <button class="btn btn-outline-primary command-btn" data-command="test-validate" onclick="runCommand('test-validate')">
-                                    <i class="fas fa-vial"></i> Test Validation
-                                </button>
-                                <button class="btn btn-dark command-btn" data-command="pipeline" onclick="runCommand('pipeline')">
-                                    <i class="fas fa-play"></i> Full Pipeline
+                                <button class="btn btn-dark command-btn" data-command="monitor" onclick="runCommand('monitor')">
+                                    <i class="fas fa-robot"></i> Auto Monitor
                                 </button>
                             </div>
                         </div>
@@ -568,6 +556,65 @@
                     <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
                 </div>
             </div>
+                </div>
+    </div>
+
+    <!-- Password Authentication Modal -->
+    <div class="modal fade" id="passwordModal" tabindex="-1" aria-labelledby="passwordModalLabel" aria-hidden="true" data-bs-backdrop="static" data-bs-keyboard="false">
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content">
+                <div class="modal-header bg-primary text-white">
+                    <h5 class="modal-title" id="passwordModalLabel">
+                        <i class="fas fa-lock"></i> Authorization Required
+                    </h5>
+                </div>
+                <div class="modal-body">
+                    <p class="text-muted mb-3">
+                        <i class="fas fa-shield-alt"></i> This operation requires authorization.
+                        <br>
+                        <small id="password-operation-text">Please enter the access code to continue.</small>
+                    </p>
+                    <div class="mb-3">
+                        <label for="access-code-input" class="form-label">Access Code</label>
+                        <input type="password" class="form-control form-control-lg text-center" 
+                               id="access-code-input" 
+                               placeholder="Enter code"
+                               autocomplete="off"
+                               onkeypress="handlePasswordKeypress(event)">
+                    </div>
+                    <div id="password-error" class="alert alert-danger" style="display: none;">
+                        <i class="fas fa-exclamation-triangle"></i> Invalid access code. Please try again.
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" onclick="cancelPasswordPrompt()">
+                        <i class="fas fa-times"></i> Cancel
+                    </button>
+                    <button type="button" class="btn btn-primary" onclick="submitPassword()">
+                        <i class="fas fa-check"></i> Submit
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- General Alert Modal -->
+    <div class="modal fade" id="alertModal" tabindex="-1" aria-labelledby="alertModalLabel" aria-hidden="true">
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content">
+                <div class="modal-header" id="alertModalHeader">
+                    <h5 class="modal-title" id="alertModalLabel">
+                        <i class="fas fa-info-circle" id="alertModalIcon"></i> <span id="alertModalTitle">Notice</span>
+                    </h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body" id="alertModalBody">
+                    <!-- Message will be inserted here -->
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-primary" data-bs-dismiss="modal">OK</button>
+                </div>
+            </div>
         </div>
     </div>
 
@@ -575,3 +622,4 @@
     <script src="app.js"></script>
 </body>
 </html>
+```

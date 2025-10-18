@@ -1,4 +1,4 @@
-const PostgreSQLManager = require('./database-manager');
+const DatabaseFactory = require('./database-factory');
 
 class StatsCache {
     constructor(existingDbManager = null) {
@@ -8,7 +8,7 @@ class StatsCache {
 
     async initialize() {
         if (!this.dbManager) {
-            this.dbManager = new PostgreSQLManager();
+            this.dbManager = DatabaseFactory.createDatabaseManager();
             await this.dbManager.connect();
         } else if (!this.dbManager.isConnected) {
             await this.dbManager.connect();
@@ -183,10 +183,9 @@ class StatsCache {
      */
     async calculateDatabaseSize() {
         try {
-            const query = `SELECT pg_database_size(current_database()) as size_bytes`;
-            const result = await this.dbManager.query(query);
-            const sizeBytes = parseInt(result.rows[0].size_bytes);
-            return this.formatDatabaseSize(sizeBytes);
+            // For SQLite, use the built-in getStats functionality
+            const stats = await this.dbManager.getStats();
+            return `${stats.databaseSizeMB} MB`;
         } catch (error) {
             console.log('Could not get database size:', error.message);
             return 'Unknown';

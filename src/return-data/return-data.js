@@ -1,7 +1,7 @@
 const yahooFinance = require('yahoo-finance2').default;
 const fs = require('fs');
 const path = require('path');
-const PostgreSQLManager = require('../db/database-manager');
+const DatabaseFactory = require('../db/database-factory');
 require('dotenv').config();
 
 // Global processor instance for session refresh access
@@ -49,9 +49,6 @@ async function handleRateLimitError(error, symbol) {
     throw new RateLimitError(`Rate limit detected: ${error.message}`);
 }
 
-// Suppress Yahoo Finance validation warnings and errors
-yahooFinance.suppressNotices(['yahooSurvey', 'ripHistorical']);
-
 // Additional error suppression - redirect console errors during processing
 const originalConsoleError = console.error;
 let suppressErrors = false;
@@ -95,28 +92,49 @@ function hasValidationWarning(ticker) {
 
 class TickerDataDatabase {
     constructor() {
-        this.dbManager = new PostgreSQLManager();
+        this.dbManager = null; // Will be initialized in initializeDatabase
     }
 
     async initializeDatabase() {
-        await this.dbManager.connect();
-        console.log('✅ PostgreSQL ticker data system initialized');
+        this.dbManager = await DatabaseFactory.createDatabaseManager();
+        console.log('✅ SQLite ticker data system initialized');
     }
 
     async insertOrUpdateTicker(ticker, jsonData) {
-        return await this.dbManager.insertOrUpdateTickerData(ticker, jsonData);
+        return await this.dbManager.upsertQuote(jsonData);
     }
 
     async getTickerCount() {
-        return await this.dbManager.getTickerDataCount();
+        const stats = await this.dbManager.getStats();
+        return stats.totalQuotes || 0;
     }
 
     async getRecentlyUpdated(limit = 10) {
-        return await this.dbManager.getRecentlyUpdatedTickerData(limit);
+        // Use getTickerDataPaginated to get recent data, sorted by updated_at
+        const result = await this.dbManager.query(`
+            SELECT t.symbol, t.exchanges, t.active, t.updated_at,
+                   q.current_price, q.market_cap, q.volume, q.quote_time
+            FROM tickers t
+            LEFT JOIN ticker_quotes q ON t.id = q.ticker_id
+            ORDER BY t.updated_at DESC
+            LIMIT ?
+        `, [limit]);
+        
+        return result.rows.map(row => ({
+            ...row,
+            exchanges: JSON.parse(row.exchanges || '[]')
+        }));
     }
 
     async isTickerRecentlyChecked(ticker, hoursAgo = 24) {
-        return await this.dbManager.isTickerRecentlyChecked(ticker, hoursAgo);
+        const result = await this.dbManager.query(`
+            SELECT t.updated_at
+            FROM tickers t
+            WHERE t.symbol = ?
+              AND t.updated_at > datetime('now', '-${hoursAgo} hours')
+        `, [ticker]);
+        
+        return result.rows.length > 0;
     }
 
     async markTickerInactive(ticker, reason = 'Schema validation error') {
@@ -554,7 +572,7 @@ async function getTickerData(symbol) {
 class TickerDataProcessor {
     constructor() {
         this.database = new TickerDataDatabase();
-        this.concurrency = 6; // Reduced concurrency to prevent PostgreSQL memory issues
+        this.concurrency = 6; // Controlled concurrency for optimal performance
         this.requestCounter = 0; // Track total API requests for session refresh
         this.refreshInterval = 2000; // Frequent refresh since we're making fewer but larger requests
         this.requestDelay = 250; // Longer delay between comprehensive requests
@@ -637,10 +655,12 @@ class TickerDataProcessor {
 
     async getActiveTickers() {
         const result = await this.database.dbManager.query(`
-            SELECT CONCAT(symbol, '.', exchange) as ticker, symbol, exchange
+            SELECT (symbol || '.' || COALESCE(json_extract(exchanges, '$[0]'), 'UNKNOWN')) as ticker, 
+                   symbol, 
+                   json_extract(exchanges, '$[0]') as exchange
             FROM tickers 
-            WHERE active = true
-            ORDER BY last_updated ASC NULLS FIRST
+            WHERE active = 1
+            ORDER BY updated_at ASC
         `);
         
         return result.rows;
@@ -658,7 +678,8 @@ class TickerDataProcessor {
         // Convert to the expected format that includes individual exchange combinations
         const tickers = [];
         for (const row of result.rows) {
-            for (const exchange of row.exchanges) {
+            const exchanges = JSON.parse(row.exchanges || '[]');
+            for (const exchange of exchanges) {
                 tickers.push({
                     ticker: `${row.symbol}.${exchange}`,
                     symbol: row.symbol,
@@ -674,9 +695,9 @@ class TickerDataProcessor {
         const result = await this.database.dbManager.query(`
             SELECT t.symbol, t.exchanges
             FROM tickers t
-            WHERE t.active = true
-                AND (t.last_validated IS NULL OR t.last_validated < NOW() - INTERVAL '${daysThreshold} days')
-            ORDER BY t.last_validated ASC NULLS FIRST
+            WHERE t.active = 1
+                AND (t.updated_at IS NULL OR t.updated_at < datetime('now', '-${daysThreshold} days'))
+            ORDER BY t.updated_at ASC
             LIMIT 1000
         `);
         
@@ -686,7 +707,7 @@ class TickerDataProcessor {
             tickers.push({
                 ticker: row.symbol, // Use symbol only, not symbol.exchange
                 symbol: row.symbol,
-                exchanges: row.exchanges // Pass all exchanges for this symbol
+                exchanges: JSON.parse(row.exchanges || '[]') // Parse JSON exchanges
             });
         }
         
@@ -697,9 +718,9 @@ class TickerDataProcessor {
         const result = await this.database.dbManager.query(`
             SELECT t.symbol, t.exchanges
             FROM tickers t
-            WHERE t.active = true
-                AND (t.last_updated IS NULL OR t.last_updated < NOW() - INTERVAL '${hoursThreshold} hours')
-            ORDER BY t.last_updated ASC NULLS FIRST
+            WHERE t.active = 1
+                AND (t.updated_at IS NULL OR t.updated_at < datetime('now', '-${hoursThreshold} hours'))
+            ORDER BY t.updated_at ASC
             LIMIT 1000
         `);
         
@@ -709,7 +730,7 @@ class TickerDataProcessor {
             tickers.push({
                 ticker: row.symbol, // Use symbol only, not symbol.exchange
                 symbol: row.symbol,
-                exchanges: row.exchanges // Pass all exchanges for this symbol
+                exchanges: JSON.parse(row.exchanges || '[]') // Parse JSON exchanges
             });
         }
         
@@ -786,9 +807,9 @@ class TickerDataProcessor {
             console.log(`✅ Batch completed in ${(batchTime / 1000).toFixed(1)}s (${tickersPerSecond} tickers/sec)`);
             this.logProgress(processedCount, startTime);
             
-            // Longer pause between batches to reduce memory pressure on PostgreSQL
+            // Pause between batches for optimal performance
             if (batchIndex < batches.length - 1) {
-                await new Promise(resolve => setTimeout(resolve, 1000)); // Increased delay for memory management
+                await new Promise(resolve => setTimeout(resolve, 1000)); // Delay for performance management
             }
         }
 
@@ -939,7 +960,7 @@ async function main() {
         // Check for help flag
         const args = process.argv.slice(2);
         if (args.includes('--help') || args.includes('-h')) {
-            console.log('📊 Ticker Data Processor - PostgreSQL Edition');
+            console.log('📊 Ticker Data Processor - SQLite Edition');
             console.log('=' .repeat(50));
             console.log('Fetches and stores comprehensive ticker data from Yahoo Finance');
             console.log('');
@@ -967,7 +988,7 @@ async function main() {
         }
         
         try {
-            console.log('📊 Ticker Data Processor - PostgreSQL Edition');
+            console.log('📊 Ticker Data Processor - SQLite Edition');
             console.log('=' .repeat(50));
             
             await processor.initialize();

@@ -1,11 +1,11 @@
-const PostgreSQLManager = require('../db/database-manager');
+const DatabaseFactory = require('../db/database-factory');
 const fs = require('fs');
 const path = require('path');
 require('dotenv').config();
 
 class DataExporter {
     constructor(existingDbManager = null) {
-        this.dbManager = existingDbManager || new PostgreSQLManager();
+        this.dbManager = existingDbManager || DatabaseFactory.createDatabaseManager();
         this.ownsDbManager = !existingDbManager; // Only manage connection if we created it
         this.outputDir = path.join(__dirname, '..', '..', 'output');
         this.processingDir = path.join(__dirname, '..', '..', 'processing');
@@ -16,7 +16,7 @@ class DataExporter {
     async initialize() {
         if (!this.dbManager.isConnected) {
             await this.dbManager.connect();
-            console.log('✅ PostgreSQL connection established');
+            console.log('✅ SQLite connection established');
         }
         
         // Ensure processing directory exists
@@ -116,7 +116,7 @@ class DataExporter {
             const countResult = await this.dbManager.query(`SELECT COUNT(*) as count FROM tickers ${whereClause}`);
             const totalCount = parseInt(countResult.rows[0].count);
             
-            console.log(`📊 Found ${totalCount} ${activeText}ticker records in PostgreSQL database`);
+            console.log(`📊 Found ${totalCount} ${activeText}ticker records in SQLite database`);
             
             if (totalCount === 0) {
                 if (activeOnly) {
@@ -380,7 +380,7 @@ class DataExporter {
                 metadata: {
                     exportDate: new Date().toISOString(),
                     totalRecords: rawData.length,
-                    dataSource: 'All-Tickers Comprehensive Data Collection (PostgreSQL)',
+                    dataSource: 'All-Tickers Comprehensive Data Collection (SQLite)',
                     version: '2.0.0',
                     description: 'Complete financial data for active tickers including quotes, historical data, and company summaries'
                 },
@@ -433,7 +433,7 @@ class DataExporter {
                 metadata: {
                     exportDate: new Date().toISOString(),
                     totalRecords: tickerData.length,
-                    dataSource: 'All-Tickers Basic Ticker List (PostgreSQL)',
+                    dataSource: 'All-Tickers Basic Ticker List (SQLite)',
                     version: '2.0.0',
                     description: 'Basic ticker list with status information (no comprehensive financial data available)'
                 },
@@ -488,7 +488,7 @@ class DataExporter {
             
             const { activeOnly = true } = options;
             
-            console.log('🚀 Starting streaming JSON export directly from PostgreSQL database...');
+            console.log('🚀 Starting streaming JSON export directly from SQLite database...');
             
             // Build WHERE clause based on activeOnly setting
             const whereClause = activeOnly ? 'WHERE t.active = true' : '';
@@ -535,7 +535,7 @@ class DataExporter {
             const metadata = {
                 exportDate: new Date().toISOString(),
                 totalRecords: totalCount,
-                dataSource: 'All-Tickers Comprehensive Data Collection (PostgreSQL)',
+                dataSource: 'All-Tickers Comprehensive Data Collection (SQLite)',
                 version: '2.0.0',
                 description: 'Complete financial data for active tickers including quotes, historical data, and company summaries'
             };

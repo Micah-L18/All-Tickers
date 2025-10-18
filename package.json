@@ -1,10 +1,12 @@
 {
   "name": "all-tickers-bulk",
   "version": "2.0.0",
-  "description": "Bulk ticker generation and validation system with PostgreSQL database",
+  "description": "Comprehensive ticker validation and data collection system with SQLite database",
   "main": "index.js",
   "scripts": {
     "start": "node --max-old-space-size=8192 server.js",
+    "monitor": "node scripts/auto-monitor.js",
+    "setup": "chmod +x scripts/setup-sqlite.sh && ./scripts/setup-sqlite.sh",
     "pipeline": "./scripts/pipeline.sh",
     "generate": "./scripts/generate.sh",
     "validate": "./scripts/validate.sh",
@@ -22,7 +24,6 @@
     "cors": "^2.8.5",
     "dotenv": "^16.0.0",
     "express": "^5.1.0",
-    "pg": "^8.11.0",
     "sqlite3": "^5.1.6",
     "yahoo-finance2": "^2.11.3"
   },

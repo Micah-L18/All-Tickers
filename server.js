@@ -3,7 +3,7 @@ const path = require('path');
 const { spawn } = require('child_process');
 const fs = require('fs');
 const cors = require('cors');
-const PostgreSQLManager = require('./src/db/database-manager');
+const { createDatabaseManager } = require('./src/db/database-factory');
 require('dotenv').config();
 
 const app = express();
@@ -20,6 +20,10 @@ let dataExporterInstance = null;
 async function getDataExporter() {
     if (!dataExporterInstance) {
         const { DataExporter } = require('./src/export/export-data');
+        // Ensure dbManager is initialized
+        if (!dbManager) {
+            throw new Error('Database manager not initialized');
+        }
         // Pass the existing dbManager to avoid creating new connections
         dataExporterInstance = new DataExporter(dbManager);
         await dataExporterInstance.initialize();
@@ -87,11 +91,17 @@ app.post('/api/export', async (req, res) => {
             return res.status(400).json({ error: 'Filename is required' });
         }
         
-        const dataExporter = await getDataExporter();
-        
         console.log(`📤 Starting JSON export with historical data: ${historicalDays ? `${historicalDays} days` : 'all data'}, active only: ${activeOnly ? 'yes' : 'no'}`);
         
-        const exportPath = await dataExporter.exportToJSON(filename, { historicalDays, activeOnly });
+        // Use SQLite manager's built-in export method
+        const exportPath = path.join(__dirname, 'output', filename);
+        
+        // Ensure output directory exists
+        if (!fs.existsSync(path.dirname(exportPath))) {
+            fs.mkdirSync(path.dirname(exportPath), { recursive: true });
+        }
+        
+        await dbManager.exportToJSON(exportPath, { historicalDays, activeOnly });
         
         res.json({
             success: true,
@@ -116,11 +126,17 @@ app.post('/api/export-csv', async (req, res) => {
             return res.status(400).json({ error: 'Filename is required' });
         }
         
-        const dataExporter = await getDataExporter();
-        
         console.log(`📤 Starting CSV export with historical data: ${historicalDays ? `${historicalDays} days` : 'all data'}, active only: ${activeOnly ? 'yes' : 'no'}`);
         
-        const exportPath = await dataExporter.exportToCSV(filename, { historicalDays, activeOnly });
+        // Use SQLite manager's built-in export method
+        const exportPath = path.join(__dirname, 'output', filename);
+        
+        // Ensure output directory exists
+        if (!fs.existsSync(path.dirname(exportPath))) {
+            fs.mkdirSync(path.dirname(exportPath), { recursive: true });
+        }
+        
+        await dbManager.exportToCSV(exportPath, { historicalDays, activeOnly });
         
         res.json({
             success: true,
@@ -136,13 +152,13 @@ app.post('/api/export-csv', async (req, res) => {
     }
 });
 
-// Initialize PostgreSQL database manager
-const dbManager = new PostgreSQLManager();
+// Initialize database manager
+let dbManager = null;
 
 // Connect to database on startup
 async function initializeDatabase() {
     try {
-        await dbManager.connect();
+        dbManager = await createDatabaseManager();
         console.log('✅ Database connected successfully');
     } catch (error) {
         console.error('❌ Failed to connect to database:', error.message);
@@ -160,10 +176,11 @@ app.get('/api/status', async (req, res) => {
         
         // Get recent activity - last 10 updated tickers
         const recentActivity = await dbManager.query(`
-            SELECT symbol as ticker, exchanges, active, price, last_updated 
-            FROM tickers 
-            WHERE last_updated IS NOT NULL 
-            ORDER BY last_updated DESC 
+            SELECT t.symbol as ticker, t.exchanges, t.active, q.current_price as price, t.updated_at as last_updated 
+            FROM tickers t
+            LEFT JOIN ticker_quotes q ON t.id = q.ticker_id
+            WHERE t.updated_at IS NOT NULL 
+            ORDER BY t.updated_at DESC 
             LIMIT 10
         `);
 
@@ -211,7 +228,7 @@ app.get('/api/tickers', async (req, res) => {
         const { page = 1, limit = 50, filter = 'all', search = '' } = req.query;
         const offset = (page - 1) * limit;
 
-        // Use the PostgreSQL manager's search function
+        // Use the SQLite manager's search function
         const searchTerm = search && search.trim() ? search.trim().toUpperCase() : '';
         let tickers;
         let totalCount;
@@ -222,42 +239,40 @@ app.get('/api/tickers', async (req, res) => {
                 ticker: row.symbol,
                 exchanges: row.exchanges,
                 active: row.active,
-                price: row.price,
-                last_checked: row.last_updated,
-                regular_market_price: row.regular_market_price,
+                last_checked: row.updated_at,
+                regular_market_price: row.current_price,
                 market_cap: row.market_cap,
                 quote_time: row.quote_time
             }));
             totalCount = searchResults.total;
         } else {
-            // Build filter conditions for PostgreSQL
+            // Build filter conditions for SQLite
             let whereClause = '';
             const queryParams = [];
-            let paramIndex = 1;
             
             if (filter === 'active') {
-                whereClause = 'WHERE t.active = true';
+                whereClause = 'WHERE t.active = 1';
             } else if (filter === 'inactive') {
-                whereClause = 'WHERE t.active = false';
+                whereClause = 'WHERE t.active = 0';
             } else if (filter === 'validated') {
-                whereClause = 'WHERE t.last_updated IS NOT NULL';
+                whereClause = 'WHERE t.updated_at IS NOT NULL';
             }
             
             queryParams.push(limit, offset);
             
             const query = `
-                SELECT t.symbol as ticker, t.exchanges, t.active, t.price, t.last_updated as last_checked,
-                       tq.regular_market_price, tq.market_cap, tq.quote_time
+                SELECT t.symbol as ticker, t.exchanges, t.active, t.updated_at as last_checked,
+                       tq.current_price as regular_market_price, tq.market_cap, tq.quote_time
                 FROM tickers t
-                LEFT JOIN LATERAL (
-                    SELECT * FROM ticker_quotes 
-                    WHERE ticker_id = t.id 
-                    ORDER BY quote_time DESC 
-                    LIMIT 1
-                ) tq ON true
+                LEFT JOIN ticker_quotes tq ON tq.ticker_id = t.id 
+                    AND tq.quote_time = (
+                        SELECT MAX(quote_time) 
+                        FROM ticker_quotes 
+                        WHERE ticker_id = t.id
+                    )
                 ${whereClause}
                 ORDER BY t.symbol
-                LIMIT $${paramIndex++} OFFSET $${paramIndex++}
+                LIMIT ? OFFSET ?
             `;
             
             const result = await dbManager.query(query, queryParams);
@@ -266,9 +281,9 @@ app.get('/api/tickers', async (req, res) => {
             // Get total count for non-search queries
             const totalResult = await dbManager.query(`
                 SELECT COUNT(*) as count FROM tickers t
-                ${filter === 'active' ? 'WHERE t.active = true' : 
-                  filter === 'inactive' ? 'WHERE t.active = false' : 
-                  filter === 'validated' ? 'WHERE t.last_updated IS NOT NULL' : ''}
+                ${filter === 'active' ? 'WHERE t.active = 1' : 
+                  filter === 'inactive' ? 'WHERE t.active = 0' : 
+                  filter === 'validated' ? 'WHERE t.updated_at IS NOT NULL' : ''}
             `);
             totalCount = parseInt(totalResult.rows[0].count);
         }
@@ -347,23 +362,23 @@ app.get('/api/stock-data/all', async (req, res) => {
         
         // Get ticker metadata with latest quote information
         const result = await dbManager.query(`
-            SELECT t.symbol as ticker, t.last_updated, t.created_at,
-                   tq.regular_market_price, tq.market_cap, tq.quote_time,
+            SELECT t.symbol as ticker, t.updated_at as last_updated, t.created_at,
+                   tq.current_price as regular_market_price, tq.market_cap, tq.quote_time,
                    (SELECT COUNT(*) FROM ticker_historical WHERE ticker_id = t.id) as historical_count
             FROM tickers t
-            LEFT JOIN LATERAL (
-                SELECT * FROM ticker_quotes 
-                WHERE ticker_id = t.id 
-                ORDER BY quote_time DESC 
-                LIMIT 1
-            ) tq ON true
-            WHERE t.active = true
-            ORDER BY t.last_updated DESC
-            LIMIT $1 OFFSET $2
+            LEFT JOIN ticker_quotes tq ON tq.ticker_id = t.id 
+                AND tq.quote_time = (
+                    SELECT MAX(quote_time) 
+                    FROM ticker_quotes 
+                    WHERE ticker_id = t.id
+                )
+            WHERE t.active = 1
+            ORDER BY t.updated_at DESC
+            LIMIT ? OFFSET ?
         `, [limit, offset]);
 
         const totalResult = await dbManager.query(`
-            SELECT COUNT(*) as count FROM tickers WHERE active = true
+            SELECT COUNT(*) as count FROM tickers WHERE active = 1
         `);
 
         const summaryData = result.rows.map(row => ({
@@ -399,7 +414,7 @@ app.get('/api/stock-data/:ticker', async (req, res) => {
         const ticker = req.params.ticker.toUpperCase();
         const [symbol, exchange] = ticker.includes('.') ? ticker.split('.') : [ticker, 'NYSE'];
         
-        // Use the PostgreSQL manager's getTickerData method
+        // Use the SQLite manager's getTickerData method
         const stockData = await dbManager.getTickerData(symbol, exchange);
 
         if (!stockData) {
@@ -429,12 +444,12 @@ app.get('/api/stock-data/:ticker', async (req, res) => {
     }
 });
 
-// API endpoint to read ticker data from PostgreSQL
+// API endpoint to read ticker data from SQLite
 app.get('/api/ticker-data', async (req, res) => {
     try {
         const { page = 1, limit = 50, ticker } = req.query;
         
-        // Use the PostgreSQL manager's getTickerDataPaginated method
+        // Use the SQLite manager's getTickerDataPaginated method
         const result = await dbManager.getTickerDataPaginated(page, limit, ticker);
         
         // If specific ticker requested, return simplified format
@@ -466,7 +481,7 @@ app.get('/api/ticker-data', async (req, res) => {
     } catch (error) {
         res.status(500).json({ 
             error: error.message,
-            message: 'Error retrieving ticker data from PostgreSQL'
+            message: 'Error retrieving ticker data from SQLite'
         });
     }
 });
@@ -483,7 +498,8 @@ app.post('/api/run-command', (req, res) => {
         'export',
         'export-legacy',
         'test-validate',
-        'pipeline'
+        'pipeline',
+        'monitor'
     ];
 
     if (!allowedCommands.includes(command)) {

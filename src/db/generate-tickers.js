@@ -1,18 +1,18 @@
-const PostgreSQLManager = require('./database-manager');
+const { createDatabaseManager } = require('./database-factory');
 const path = require('path');
 const fs = require('fs');
 require('dotenv').config();
 
 class TickerGenerator {
     constructor() {
-        this.dbManager = new PostgreSQLManager();
+        this.dbManager = null; // Will be initialized in initDatabase
         this.batchSize = 10000; // Process in batches for better performance
     }
 
     // Initialize database connection
     async initDatabase() {
-        await this.dbManager.connect();
-        console.log('✅ PostgreSQL connection established for ticker generation');
+        this.dbManager = await createDatabaseManager();
+        console.log('✅ Database connection established for ticker generation');
     }
 
     // Generate all possible ticker combinations from A to ZZZZZ
@@ -34,43 +34,43 @@ class TickerGenerator {
             }
         }
 
-        // Generate 3-letter tickers (AAA-ZZZ)
-        for (let i = 0; i < alphabet.length; i++) {
-            for (let j = 0; j < alphabet.length; j++) {
-                for (let k = 0; k < alphabet.length; k++) {
-                    const symbol = alphabet[i] + alphabet[j] + alphabet[k];
-                    tickers.push({ symbol, exchanges: [...exchanges] });
-                }
-            }
-        }
+        // // Generate 3-letter tickers (AAA-ZZZ)
+        // for (let i = 0; i < alphabet.length; i++) {
+        //     for (let j = 0; j < alphabet.length; j++) {
+        //         for (let k = 0; k < alphabet.length; k++) {
+        //             const symbol = alphabet[i] + alphabet[j] + alphabet[k];
+        //             tickers.push({ symbol, exchanges: [...exchanges] });
+        //         }
+        //     }
+        // }
 
-        // Generate 4-letter tickers (AAAA-ZZZZ)
-        for (let i = 0; i < alphabet.length; i++) {
-            for (let j = 0; j < alphabet.length; j++) {
-                for (let k = 0; k < alphabet.length; k++) {
-                    for (let l = 0; l < alphabet.length; l++) {
-                        const symbol = alphabet[i] + alphabet[j] + alphabet[k] + alphabet[l];
-                        tickers.push({ symbol, exchanges: [...exchanges] });
-                    }
-                }
-            }
-        }
+        // // Generate 4-letter tickers (AAAA-ZZZZ)
+        // for (let i = 0; i < alphabet.length; i++) {
+        //     for (let j = 0; j < alphabet.length; j++) {
+        //         for (let k = 0; k < alphabet.length; k++) {
+        //             for (let l = 0; l < alphabet.length; l++) {
+        //                 const symbol = alphabet[i] + alphabet[j] + alphabet[k] + alphabet[l];
+        //                 tickers.push({ symbol, exchanges: [...exchanges] });
+        //             }
+        //         }
+        //     }
+        // }
 
-        // Generate 5-letter tickers (AAAAA-ZZZZZ)
-        // NOTE: This will generate a very large number of combinations
-        // Consider running this separately or with additional filtering
-        for (let i = 0; i < alphabet.length; i++) {
-            for (let j = 0; j < alphabet.length; j++) {
-                for (let k = 0; k < alphabet.length; k++) {
-                    for (let l = 0; l < alphabet.length; l++) {
-                        for (let m = 0; m < alphabet.length; m++) {
-                            const symbol = alphabet[i] + alphabet[j] + alphabet[k] + alphabet[l] + alphabet[m];
-                            tickers.push({ symbol, exchanges: [...exchanges] });
-                        }
-                    }
-                }
-            }
-        }
+        // // Generate 5-letter tickers (AAAAA-ZZZZZ)
+        // // NOTE: This will generate a very large number of combinations
+        // // Consider running this separately or with additional filtering
+        // for (let i = 0; i < alphabet.length; i++) {
+        //     for (let j = 0; j < alphabet.length; j++) {
+        //         for (let k = 0; k < alphabet.length; k++) {
+        //             for (let l = 0; l < alphabet.length; l++) {
+        //                 for (let m = 0; m < alphabet.length; m++) {
+        //                     const symbol = alphabet[i] + alphabet[j] + alphabet[k] + alphabet[l] + alphabet[m];
+        //                     tickers.push({ symbol, exchanges: [...exchanges] });
+        //                 }
+        //             }
+        //         }
+        //     }
+        // }
 
         return tickers;
     }
@@ -113,7 +113,7 @@ class TickerGenerator {
         return combinations;
     }
 
-    // Bulk insert tickers into PostgreSQL database
+    // Bulk insert tickers into SQLite database
     async insertTickers(tickers) {
         console.log(`📊 Starting bulk insert of ${tickers.length} ticker combinations...`);
         
@@ -136,13 +136,12 @@ class TickerGenerator {
                 let paramIndex = 1;
                 
                 for (const ticker of batch) {
-                    placeholders.push(`($${paramIndex}, $${paramIndex + 1})`);
-                    values.push(ticker.symbol, ticker.exchanges);
-                    paramIndex += 2;
+                    placeholders.push(`(?, ?, ?)`);
+                    values.push(ticker.symbol, JSON.stringify(ticker.exchanges), null); // null = unvalidated
                 }
                 
                 const query = `
-                    INSERT INTO tickers (symbol, exchanges)
+                    INSERT INTO tickers (symbol, exchanges, active)
                     VALUES ${placeholders.join(', ')}
                     ON CONFLICT (symbol) DO NOTHING
                 `;
@@ -205,19 +204,7 @@ class TickerGenerator {
 
     // Get exchange breakdown statistics
     async getExchangeStats() {
-        const result = await this.dbManager.query(`
-            SELECT 
-                unnest(exchanges) as exchange_name,
-                COUNT(*) as total,
-                COUNT(CASE WHEN active = true THEN 1 END) as active_count,
-                COUNT(CASE WHEN active = false THEN 1 END) as inactive_count,
-                COUNT(CASE WHEN active IS NULL THEN 1 END) as unvalidated_count
-            FROM tickers
-            GROUP BY exchange_name
-            ORDER BY total DESC
-        `);
-        
-        return result.rows;
+        return await this.dbManager.getExchangeStats();
     }
 
     // Clear existing ticker data (with confirmation)
@@ -264,7 +251,7 @@ class TickerGenerator {
 
 // Main execution function
 async function main() {
-    console.log('🚀 All-Tickers Bulk Generator v3.0 - PostgreSQL Edition');
+    console.log('🚀 All-Tickers Bulk Generator v3.0 - SQLite Edition');
     console.log('=' .repeat(60));
     
     const generator = new TickerGenerator();
@@ -359,7 +346,7 @@ async function main() {
         }
         
         // Insert tickers into database
-        console.log('\n💾 Inserting ticker combinations into PostgreSQL...');
+        console.log('\n💾 Inserting ticker combinations into SQLite...');
         const insertStartTime = Date.now();
         const insertResult = await generator.insertTickers(tickers);
         
