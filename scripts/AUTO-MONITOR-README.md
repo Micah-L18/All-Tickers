@@ -28,7 +28,7 @@ node scripts/auto-monitor.js
 ```
 
 ### From Dashboard
-Click the **Auto Monitor** button (requires access code: `007`)
+Click the **Auto Monitor** button (requires access code - configured in `.env` as `ACCESS_CODE`)
 
 ### Stop Auto-Monitor
 Press `Ctrl+C` or stop the process from the dashboard
@@ -103,7 +103,7 @@ When running through the dashboard:
 - Shows as a running process
 - Can be stopped via process details modal
 - Displays live output in terminal window
-- Protects with access code `007`
+- Protects with access code (configurable in `.env`)
 
 ## Notes
 

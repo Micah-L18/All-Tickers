@@ -85,20 +85,38 @@ function showPasswordModal(operationText = 'Please enter the access code to cont
 }
 
 // Handle password submission
-function submitPassword() {
+async function submitPassword() {
     const enteredCode = document.getElementById('access-code-input').value;
-    const correctCode = '007';
     
-    if (enteredCode === correctCode) {
-        // Correct password
-        if (passwordModal) {
-            passwordModal.hide();
+    try {
+        // Validate code with server
+        const response = await fetch('/api/validate-access-code', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ accessCode: enteredCode })
+        });
+        
+        const data = await response.json();
+        
+        if (data.valid) {
+            // Correct password - return the code before closing modal
+            if (passwordModal) {
+                passwordModal.hide();
+            }
+            if (passwordModalResolve) {
+                passwordModalResolve(enteredCode); // Return the actual code, not just true
+            }
+        } else {
+            // Wrong password
+            document.getElementById('password-error').style.display = 'block';
+            document.getElementById('access-code-input').value = '';
+            document.getElementById('access-code-input').focus();
         }
-        if (passwordModalResolve) {
-            passwordModalResolve(true);
-        }
-    } else {
-        // Wrong password
+    } catch (error) {
+        console.error('Error validating access code:', error);
+        document.getElementById('password-error').textContent = 'Error validating code. Please try again.';
         document.getElementById('password-error').style.display = 'block';
         document.getElementById('access-code-input').value = '';
         document.getElementById('access-code-input').focus();
@@ -199,6 +217,54 @@ document.addEventListener('DOMContentLoaded', function() {
     setInterval(() => loadTickers(currentPage), 30000);
 });
 
+// Function to manually refresh stats (force cache invalidation)
+async function refreshStats() {
+    const btn = event.target.closest('button');
+    const icon = btn.querySelector('i');
+    
+    // Show spinner
+    icon.classList.remove('fa-sync-alt');
+    icon.classList.add('fa-spinner', 'fa-spin');
+    btn.disabled = true;
+    
+    try {
+        const response = await fetch('/api/refresh-stats', { method: 'POST' });
+        const data = await response.json();
+        
+        if (data.success) {
+            // Reload the status display
+            await loadSystemStatus();
+            
+            // Show success message briefly
+            const originalText = btn.innerHTML;
+            btn.innerHTML = '<i class="fas fa-check"></i> Refreshed!';
+            btn.classList.replace('btn-outline-primary', 'btn-success');
+            
+            setTimeout(() => {
+                btn.innerHTML = originalText;
+                btn.classList.replace('btn-success', 'btn-outline-primary');
+                btn.disabled = false;
+            }, 2000);
+        } else {
+            throw new Error(data.error || 'Failed to refresh stats');
+        }
+    } catch (error) {
+        console.error('Error refreshing stats:', error);
+        
+        // Show error state
+        icon.classList.remove('fa-spinner', 'fa-spin');
+        icon.classList.add('fa-exclamation-triangle');
+        btn.classList.replace('btn-outline-primary', 'btn-danger');
+        
+        setTimeout(() => {
+            icon.classList.remove('fa-exclamation-triangle');
+            icon.classList.add('fa-sync-alt');
+            btn.classList.replace('btn-danger', 'btn-outline-primary');
+            btn.disabled = false;
+        }, 2000);
+    }
+}
+
 // Function to update just the stats numbers without reloading the entire status
 async function updateStatsNumbers() {
     try {
@@ -209,14 +275,12 @@ async function updateStatsNumbers() {
             // Update each stat number individually
             const statElements = {
                 'total': document.querySelector('#status-overview .text-primary'),
-                'validated': document.querySelector('#status-overview .text-info'),
                 'active': document.querySelector('#status-overview .text-success'),
                 'need_validation': document.querySelector('#status-overview .text-warning'),
                 'need_data_update': document.querySelector('#status-overview .text-danger')
             };
             
             if (statElements.total) statElements.total.textContent = (data.stats.total || 0).toLocaleString();
-            if (statElements.validated) statElements.validated.textContent = (data.stats.validated || 0).toLocaleString();
             if (statElements.active) statElements.active.textContent = (data.stats.active || 0).toLocaleString();
             if (statElements.need_validation) statElements.need_validation.textContent = (data.stats.need_validation || 0).toLocaleString();
             if (statElements.need_data_update) statElements.need_data_update.textContent = (data.stats.need_data_update || 0).toLocaleString();
@@ -231,6 +295,11 @@ async function updateStatsNumbers() {
 async function loadSystemStatus() {
     try {
         const response = await fetch('/api/status');
+        
+        if (!response.ok) {
+            throw new Error(`Server returned ${response.status}: ${response.statusText}`);
+        }
+        
         const data = await response.json();
         
         const statusDiv = document.getElementById('status-overview');
@@ -266,36 +335,30 @@ async function loadSystemStatus() {
         } else if (data.stats) {
             statusDiv.innerHTML = runningProcessesHtml + `
                 <div class="row">
-                    <div class="col-md-2">
+                    <div class="col-md-3">
                         <div class="text-center">
                             <h3 class="text-primary">${(data.stats.total || 0).toLocaleString()}</h3>
                             <small>Total Tickers</small>
                         </div>
                     </div>
-                    <div class="col-md-2">
-                        <div class="text-center">
-                            <h3 class="text-info">${(data.stats.validated || 0).toLocaleString()}</h3>
-                            <small>Validated Tickers</small>
-                        </div>
-                    </div>
-                    <div class="col-md-2">
+                    <div class="col-md-3">
                         <div class="text-center">
                             <h3 class="text-success">${(data.stats.active || 0).toLocaleString()}</h3>
                             <small>Active Tickers</small>
                         </div>
                     </div>
-                    <div class="col-md-2">
+                    <div class="col-md-3">
                         <div class="text-center">
                             <h3 class="text-warning">${(data.stats.need_validation || 0).toLocaleString()}</h3>
                             <small>Need Validation</small>
-                            <br><small class="text-muted">(never or >5 days)</small>
+                            <br><small class="text-muted">(never validated)</small>
                         </div>
                     </div>
-                    <div class="col-md-4">
+                    <div class="col-md-3">
                         <div class="text-center">
                             <h3 class="text-danger">${(data.stats.need_data_update || 0).toLocaleString()}</h3>
                             <small>Need Data Update</small>
-                            <br><small class="text-muted">(active, >1 day old)</small>
+                            <br><small class="text-muted">(active, >60 sec old)</small>
                         </div>
                     </div>
                 </div>
@@ -406,11 +469,17 @@ async function loadTickers(page = 1) {
         if (viewType === 'errors') {
             // Load errors
             response = await fetch(`/api/tickers/errors?page=${page}&limit=50&search=${encodeURIComponent(search)}`);
+            if (!response.ok) {
+                throw new Error(`Server returned ${response.status}: ${response.statusText}`);
+            }
             data = await response.json();
             displayErrors(data);
         } else {
             // Load tickers
             response = await fetch(`/api/tickers?page=${page}&limit=50&filter=${filter}&search=${encodeURIComponent(search)}`);
+            if (!response.ok) {
+                throw new Error(`Server returned ${response.status}: ${response.statusText}`);
+            }
             data = await response.json();
             displayTickers(data);
         }
@@ -1263,12 +1332,17 @@ function escapeHtml(text) {
 async function confirmKillProcess() {
     if (!currentModalProcessId) return;
     
-    const confirmed = confirm(
-        `Are you sure you want to stop this process?\n\n` +
-        `This will terminate the running command and cannot be undone.`
-    );
-    
-    if (!confirmed) return;
+    // Use the same password modal as other protected operations
+    let accessCode;
+    try {
+        const operationText = `⚠️ <strong>PROCESS TERMINATION</strong><br><br>
+                              This will immediately stop the running process.<br>
+                              Please enter the access code to proceed.`;
+        accessCode = await showPasswordModal(operationText); // Now returns the access code
+    } catch (error) {
+        // User cancelled or wrong password
+        return;
+    }
     
     try {
         const response = await fetch('/api/kill-process', {
@@ -1276,7 +1350,10 @@ async function confirmKillProcess() {
             headers: {
                 'Content-Type': 'application/json'
             },
-            body: JSON.stringify({ processId: currentModalProcessId })
+            body: JSON.stringify({ 
+                processId: currentModalProcessId,
+                accessCode: accessCode 
+            })
         });
         
         const data = await response.json();
@@ -1295,17 +1372,25 @@ async function confirmKillProcess() {
             // Refresh system status
             loadSystemStatus();
         } else {
-            showAlert(
-                `Failed to stop process:<br><br>${data.error}`,
-                'Stop Failed',
-                'error'
-            );
+            if (response.status === 403) {
+                showAlert(
+                    `❌ Invalid access code. Process termination requires authorization.`,
+                    'Access Denied',
+                    'danger'
+                );
+            } else {
+                showAlert(
+                    `Failed to stop process:<br><br>${data.error}`,
+                    'Stop Failed',
+                    'danger'
+                );
+            }
         }
     } catch (error) {
         showAlert(
             `Error stopping process:<br><br>${error.message}`,
             'Error',
-            'error'
+            'danger'
         );
     }
 }

@@ -260,6 +260,7 @@ class SQLiteManager {
             'UPDATE tickers SET active = ? WHERE symbol = ?',
             [1, symbol]
         );
+        await this.invalidateStatsCache();
     }
 
     async markTickerInactive(symbol) {
@@ -267,6 +268,7 @@ class SQLiteManager {
             'UPDATE tickers SET active = ? WHERE symbol = ?',
             [0, symbol]
         );
+        await this.invalidateStatsCache();
     }
 
     async getAllTickers(activeOnly = false) {
@@ -284,55 +286,112 @@ class SQLiteManager {
         }));
     }
 
-    async getStats() {
+    async getStats(useCache = true) {
         const stats = {};
         
         try {
-            // Total tickers
-            const totalResult = await this.query('SELECT COUNT(*) as count FROM tickers');
-            stats.total = totalResult.rows[0].count;
+            // Check cache first (only if requested)
+            if (useCache) {
+                const cacheResult = await this.query(
+                    "SELECT stat_value FROM stats_cache WHERE stat_name = 'dashboard_stats' AND expires_at > datetime('now')"
+                );
+                
+                if (cacheResult.rows.length > 0) {
+                    console.log('📊 Using cached stats');
+                    return JSON.parse(cacheResult.rows[0].stat_value);
+                }
+            }
+            
+            console.log('📊 Calculating fresh stats...');
+            
+            // Optimized: Use a single query with aggregations instead of multiple COUNT queries
+            // This is much faster on large tables
+            const statsQuery = `
+                SELECT 
+                    COUNT(*) as total,
+                    SUM(CASE WHEN active = 1 THEN 1 ELSE 0 END) as active_count,
+                    SUM(CASE WHEN active IS NULL THEN 1 ELSE 0 END) as need_validation
+                FROM tickers
+            `;
+            
+            const mainStats = await this.query(statsQuery);
+            stats.total = mainStats.rows[0].total;
             stats.totalTickers = stats.total;
-            
-            // Active tickers
-            const activeResult = await this.query('SELECT COUNT(*) as count FROM tickers WHERE active = 1');
-            stats.active_count = activeResult.rows[0].count;
+            stats.active_count = mainStats.rows[0].active_count;
             stats.activeTickers = stats.active_count;
+            stats.need_validation = mainStats.rows[0].need_validation;
+            stats.unvalidated_count = mainStats.rows[0].need_validation; // For backwards compatibility
             
-            // Validated count (tickers with metadata)
-            const validatedResult = await this.query('SELECT COUNT(*) as count FROM ticker_metadata WHERE validation_status = "validated"');
-            stats.validated_count = validatedResult.rows[0].count;
+            // Get quotes and historical counts (run in parallel)
+            const [quotesResult, historicalResult] = await Promise.all([
+                this.query('SELECT COUNT(*) as count FROM ticker_quotes'),
+                this.query('SELECT COUNT(*) as count FROM ticker_historical')
+            ]);
             
-            // Unvalidated count
-            const unvalidatedResult = await this.query('SELECT COUNT(*) as count FROM ticker_metadata WHERE validation_status = "pending"');
-            stats.unvalidated_count = unvalidatedResult.rows[0].count;
-            
-            // Total quotes
-            const quotesResult = await this.query('SELECT COUNT(*) as count FROM ticker_quotes');
             stats.totalQuotes = quotesResult.rows[0].count;
-            
-            // Total historical records
-            const historicalResult = await this.query('SELECT COUNT(*) as count FROM ticker_historical');
             stats.totalHistoricalRecords = historicalResult.rows[0].count;
+            stats.historical_count = quotesResult.rows[0].count; // Tickers with quotes
+            stats.total_historical_records = historicalResult.rows[0].count;
             
             // Database size
             const dbStats = fs.statSync(this.dbPath);
-            stats.databaseSizeMB = (dbStats.size / (1024 * 1024)).toFixed(2);
+            const sizeMB = dbStats.size / (1024 * 1024);
+            
+            // Show GB if size is above 1000MB
+            if (sizeMB >= 1000) {
+                const sizeGB = (sizeMB / 1024).toFixed(2);
+                stats.databaseSizeMB = sizeMB.toFixed(2);
+                stats.database_size = `${sizeGB} GB`;
+            } else {
+                stats.databaseSizeMB = sizeMB.toFixed(2);
+                stats.database_size = `${sizeMB.toFixed(2)} MB`;
+            }
+            
+            console.log('📊 Stats calculated:', {
+                total: stats.total,
+                active: stats.active_count,
+                need_validation: stats.need_validation,
+                quotes: stats.totalQuotes
+            });
+            
+            // Cache the results for 5 minutes
+            await this.query(
+                `INSERT OR REPLACE INTO stats_cache (stat_name, stat_value, expires_at) 
+                 VALUES ('dashboard_stats', ?, datetime('now', '+5 minutes'))`,
+                [JSON.stringify(stats)]
+            );
+            
+            console.log('✅ Stats calculated and cached');
             
             return stats;
         } catch (error) {
             console.error('Error getting stats:', error);
+            console.error('Stack trace:', error.stack);
             return { 
                 error: error.message,
                 total: 0,
                 active_count: 0,
+                need_validation: 0,
                 validated_count: 0,
                 unvalidated_count: 0,
                 totalTickers: 0,
                 activeTickers: 0,
                 totalQuotes: 0,
                 totalHistoricalRecords: 0,
-                databaseSizeMB: '0.00'
+                historical_count: 0,
+                total_historical_records: 0,
+                databaseSizeMB: '0.00',
+                database_size: '0.00 MB'
             };
+        }
+    }
+
+    async invalidateStatsCache() {
+        try {
+            await this.query("DELETE FROM stats_cache WHERE stat_name = 'dashboard_stats'");
+            console.log('🗑️  Stats cache invalidated');
+        } catch (error) {
+            console.error('Error invalidating stats cache:', error);
         }
     }
 

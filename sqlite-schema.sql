@@ -136,6 +136,10 @@ CREATE INDEX IF NOT EXISTS idx_ticker_financials_date ON ticker_financials(repor
 CREATE INDEX IF NOT EXISTS idx_stats_cache_name ON stats_cache(stat_name);
 CREATE INDEX IF NOT EXISTS idx_stats_cache_expires ON stats_cache(expires_at);
 
+-- Performance index for stats queries
+CREATE INDEX IF NOT EXISTS idx_ticker_metadata_validation ON ticker_metadata(validation_status);
+CREATE INDEX IF NOT EXISTS idx_tickers_active ON tickers(active);
+
 -- Views for common queries
 CREATE VIEW IF NOT EXISTS v_active_tickers_with_quotes AS
 SELECT 

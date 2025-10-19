@@ -34,43 +34,43 @@ class TickerGenerator {
             }
         }
 
-        // // Generate 3-letter tickers (AAA-ZZZ)
-        // for (let i = 0; i < alphabet.length; i++) {
-        //     for (let j = 0; j < alphabet.length; j++) {
-        //         for (let k = 0; k < alphabet.length; k++) {
-        //             const symbol = alphabet[i] + alphabet[j] + alphabet[k];
-        //             tickers.push({ symbol, exchanges: [...exchanges] });
-        //         }
-        //     }
-        // }
+        // Generate 3-letter tickers (AAA-ZZZ)
+        for (let i = 0; i < alphabet.length; i++) {
+            for (let j = 0; j < alphabet.length; j++) {
+                for (let k = 0; k < alphabet.length; k++) {
+                    const symbol = alphabet[i] + alphabet[j] + alphabet[k];
+                    tickers.push({ symbol, exchanges: [...exchanges] });
+                }
+            }
+        }
 
-        // // Generate 4-letter tickers (AAAA-ZZZZ)
-        // for (let i = 0; i < alphabet.length; i++) {
-        //     for (let j = 0; j < alphabet.length; j++) {
-        //         for (let k = 0; k < alphabet.length; k++) {
-        //             for (let l = 0; l < alphabet.length; l++) {
-        //                 const symbol = alphabet[i] + alphabet[j] + alphabet[k] + alphabet[l];
-        //                 tickers.push({ symbol, exchanges: [...exchanges] });
-        //             }
-        //         }
-        //     }
-        // }
+        // Generate 4-letter tickers (AAAA-ZZZZ)
+        for (let i = 0; i < alphabet.length; i++) {
+            for (let j = 0; j < alphabet.length; j++) {
+                for (let k = 0; k < alphabet.length; k++) {
+                    for (let l = 0; l < alphabet.length; l++) {
+                        const symbol = alphabet[i] + alphabet[j] + alphabet[k] + alphabet[l];
+                        tickers.push({ symbol, exchanges: [...exchanges] });
+                    }
+                }
+            }
+        }
 
-        // // Generate 5-letter tickers (AAAAA-ZZZZZ)
-        // // NOTE: This will generate a very large number of combinations
-        // // Consider running this separately or with additional filtering
-        // for (let i = 0; i < alphabet.length; i++) {
-        //     for (let j = 0; j < alphabet.length; j++) {
-        //         for (let k = 0; k < alphabet.length; k++) {
-        //             for (let l = 0; l < alphabet.length; l++) {
-        //                 for (let m = 0; m < alphabet.length; m++) {
-        //                     const symbol = alphabet[i] + alphabet[j] + alphabet[k] + alphabet[l] + alphabet[m];
-        //                     tickers.push({ symbol, exchanges: [...exchanges] });
-        //                 }
-        //             }
-        //         }
-        //     }
-        // }
+        // Generate 5-letter tickers (AAAAA-ZZZZZ)
+        // NOTE: This will generate a very large number of combinations
+        // Consider running this separately or with additional filtering
+        for (let i = 0; i < alphabet.length; i++) {
+            for (let j = 0; j < alphabet.length; j++) {
+                for (let k = 0; k < alphabet.length; k++) {
+                    for (let l = 0; l < alphabet.length; l++) {
+                        for (let m = 0; m < alphabet.length; m++) {
+                            const symbol = alphabet[i] + alphabet[j] + alphabet[k] + alphabet[l] + alphabet[m];
+                            tickers.push({ symbol, exchanges: [...exchanges] });
+                        }
+                    }
+                }
+            }
+        }
 
         return tickers;
     }

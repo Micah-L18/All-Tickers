@@ -7,7 +7,7 @@ const { createDatabaseManager } = require('./src/db/database-factory');
 require('dotenv').config();
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 3001;
 
 // Store running processes for interactive input
 // Initialize process tracking
@@ -158,21 +158,58 @@ let dbManager = null;
 // Connect to database on startup
 async function initializeDatabase() {
     try {
+        console.log('🗄️  Initializing database connection...');
         dbManager = await createDatabaseManager();
-        console.log('✅ Database connected successfully');
+        console.log('✅ Database manager ready');
+        return dbManager;
     } catch (error) {
         console.error('❌ Failed to connect to database:', error.message);
+        console.error(error.stack);
         process.exit(1);
     }
 }
 
-// Initialize database connection
-initializeDatabase();
+// Start server after database initialization
+async function startServer() {
+    try {
+        console.log('🚀 Starting All-Tickers server...');
+        
+        // Initialize database connection first
+        await initializeDatabase();
+        console.log('✅ Database initialization complete');
+        
+        // Then start the HTTP server
+        app.listen(PORT, () => {
+            console.log('='.repeat(60));
+            console.log('🌟 All-Tickers Dashboard Server Started');
+            console.log('='.repeat(60));
+            console.log(`🌐 Server running on: http://localhost:${PORT}`);
+            console.log(`📊 Dashboard URL:    http://localhost:${PORT}`);
+            console.log(`🔌 Port:             ${PORT}`);
+            console.log('='.repeat(60));
+            console.log('Press Ctrl+C to stop the server');
+            console.log('');
+        });
+    } catch (error) {
+        console.error('❌ Failed to start server:', error);
+        console.error(error.stack);
+        process.exit(1);
+    }
+}
 
 // API Routes
 app.get('/api/status', async (req, res) => {
     try {
         const stats = await dbManager.getStats();
+        
+        // Get count of active tickers needing data update (more than 60 seconds old or never updated)
+        const needDataUpdateResult = await dbManager.query(`
+            SELECT COUNT(*) as count
+            FROM tickers
+            WHERE active = 1
+                AND (updated_at IS NULL OR updated_at < datetime('now', '-60 seconds'))
+        `);
+        const needDataUpdate = needDataUpdateResult.rows[0]?.count || 0;
         
         // Get recent activity - last 10 updated tickers
         const recentActivity = await dbManager.query(`
@@ -186,13 +223,12 @@ app.get('/api/status', async (req, res) => {
 
         // Transform stats to match frontend expectations
         const transformedStats = {
-            total: stats.total || '0',
-            active: stats.active_count || '0',
-            validated: stats.validated_count || '0', 
-            need_validation: stats.unvalidated_count || '0',
-            need_data_update: '0', // We'll calculate this separately if needed
-            historical_count: stats.historical_count || '0',
-            total_historical_records: stats.total_historical_records || '0',
+            total: (stats.total || 0).toString(),
+            active: (stats.active_count || 0).toString(),
+            need_validation: (stats.need_validation || 0).toString(),
+            need_data_update: needDataUpdate.toString(),
+            historical_count: (stats.historical_count || 0).toString(),
+            total_historical_records: (stats.total_historical_records || 0).toString(),
             database_size: stats.database_size || 'Unknown'
         };
 
@@ -219,6 +255,23 @@ app.get('/api/status', async (req, res) => {
         });
 
     } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Endpoint to refresh stats cache
+app.post('/api/refresh-stats', async (req, res) => {
+    try {
+        console.log('🔄 Manual stats refresh requested');
+        await dbManager.invalidateStatsCache();
+        const freshStats = await dbManager.getStats(false); // Force fresh calculation
+        res.json({ 
+            success: true, 
+            message: 'Stats cache refreshed',
+            stats: freshStats
+        });
+    } catch (error) {
+        console.error('Error refreshing stats:', error);
         res.status(500).json({ error: error.message });
     }
 });
@@ -538,7 +591,7 @@ app.post('/api/run-command', (req, res) => {
     let isWaitingForInput = false;
 
     // Send initial message with process ID for interactive commands
-    if (command === 'generate' || command === 'pipeline') {
+    if (command === 'generate' || command === 'gather' || command === 'pipeline') {
         res.write(`Starting ${command} command... (Process ID: ${processId})\n\n`);
     } else {
         res.write(`Starting ${command} command...\n\n`);
@@ -727,12 +780,21 @@ app.get('/api/process-output/:processId', (req, res) => {
     });
 });
 
-// Kill/terminate a running process
+// Kill/terminate a running process (requires access code)
 app.post('/api/kill-process', (req, res) => {
-    const { processId } = req.body;
+    const { processId, accessCode } = req.body;
     
     if (!processId) {
         return res.status(400).json({ error: 'Process ID is required' });
+    }
+    
+    // Check access code from environment variable
+    const requiredAccessCode = process.env.PROCESS_KILL_CODE || 'admin123';
+    if (!accessCode || accessCode !== requiredAccessCode) {
+        return res.status(403).json({ 
+            error: 'Invalid or missing access code',
+            requiresAuth: true 
+        });
     }
     
     const processInfo = runningProcesses.get(processId);
@@ -760,6 +822,27 @@ app.post('/api/kill-process', (req, res) => {
         });
     } catch (error) {
         res.status(500).json({ error: `Failed to kill process: ${error.message}` });
+    }
+});
+
+// Validate access code endpoint
+app.post('/api/validate-access-code', (req, res) => {
+    const { accessCode } = req.body;
+    
+    if (!accessCode) {
+        return res.status(400).json({ 
+            valid: false,
+            error: 'Access code is required' 
+        });
+    }
+    
+    // Check access code from environment variable
+    const requiredAccessCode = process.env.ACCESS_CODE || '007';
+    
+    if (accessCode === requiredAccessCode) {
+        res.json({ valid: true });
+    } else {
+        res.json({ valid: false });
     }
 });
 
@@ -985,6 +1068,8 @@ app.use((err, req, res, next) => {
     res.status(500).json({ error: 'Something went wrong!' });
 });
 
-app.listen(PORT, () => {
-    console.log(`🌟 All-Tickers Dashboard running on http://localhost:${PORT}`);
+// Start the server (after all routes are defined)
+startServer().catch(error => {
+    console.error('❌ Failed to start server:', error);
+    process.exit(1);
 });

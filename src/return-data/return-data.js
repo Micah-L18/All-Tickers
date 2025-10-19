@@ -101,7 +101,41 @@ class TickerDataDatabase {
     }
 
     async insertOrUpdateTicker(ticker, jsonData) {
-        return await this.dbManager.upsertQuote(jsonData);
+        // Extract symbol from ticker format like "A.NYSE" -> "A"
+        const symbol = ticker && ticker.includes('.') ? ticker.split('.')[0] : ticker;
+        const exchange = ticker && ticker.includes('.') ? ticker.split('.')[1] : null;
+        
+        // Prepare data for upsertQuote - map from our structured format to flat format
+        const tickerData = {
+            symbol: symbol,
+            regularMarketPrice: jsonData.quote?.regularMarketPrice || jsonData.quote?.price,
+            previousClose: jsonData.quote?.regularMarketPreviousClose,
+            open: jsonData.quote?.regularMarketOpen || jsonData.quote?.open,
+            bid: jsonData.quote?.bid,
+            ask: jsonData.quote?.ask,
+            regularMarketDayRange: jsonData.quote?.regularMarketDayRange,
+            fiftyTwoWeekRange: jsonData.quote?.fiftyTwoWeekLow && jsonData.quote?.fiftyTwoWeekHigh 
+                ? `${jsonData.quote.fiftyTwoWeekLow} - ${jsonData.quote.fiftyTwoWeekHigh}`
+                : null,
+            volume: jsonData.quote?.regularMarketVolume || jsonData.quote?.volume,
+            averageVolume: jsonData.summary?.summaryDetail?.averageVolume || jsonData.summary?.averageVolume,
+            marketCap: jsonData.summary?.summaryDetail?.marketCap || jsonData.summary?.marketCap,
+            beta: jsonData.summary?.defaultKeyStatistics?.beta || jsonData.summary?.beta,
+            trailingPE: jsonData.summary?.summaryDetail?.trailingPE || jsonData.summary?.priceEarningsRatio,
+            eps: jsonData.summary?.defaultKeyStatistics?.trailingEps || jsonData.summary?.earningsPerShare,
+            dividendYield: jsonData.summary?.summaryDetail?.dividendYield || jsonData.summary?.dividendYield,
+            exchanges: exchange ? [exchange] : []
+        };
+        
+        // Store in database
+        const result = await this.dbManager.upsertQuote(tickerData);
+        
+        // Also store historical data if available
+        if (jsonData.historical && jsonData.historical.length > 0) {
+            await this.dbManager.upsertHistoricalData(symbol, jsonData.historical);
+        }
+        
+        return result;
     }
 
     async getTickerCount() {
@@ -143,11 +177,7 @@ class TickerDataDatabase {
             const symbol = ticker.includes('.') ? ticker.split('.')[0] : ticker;
             
             // Update the ticker as inactive in the main tickers table
-            await this.dbManager.updateTicker(symbol, {
-                active: false,
-                price: -1,
-                updateValidated: true  // Mark as validated during this check
-            });
+            await this.dbManager.markTickerInactive(symbol);
             
             console.log(`🔄 Marked ${symbol} as inactive due to: ${reason}`);
             return { ticker: symbol, success: true };
@@ -163,11 +193,7 @@ class TickerDataDatabase {
             const symbol = ticker.includes('.') ? ticker.split('.')[0] : ticker;
             
             // Update the ticker as active in the main tickers table
-            await this.dbManager.updateTicker(symbol, {
-                active: true,
-                price: price,
-                updateValidated: true  // Mark as validated during this check
-            });
+            await this.dbManager.markTickerActive(symbol);
             
             console.log(`✅ Marked ${symbol} as active with price: $${price}`);
             return { ticker: symbol, success: true };
@@ -692,11 +718,14 @@ class TickerDataProcessor {
     }
 
     async getTickersNeedingValidation(daysThreshold = 5) {
+        // For quick testing, use 60 seconds instead of days
+        const secondsThreshold = 60; // Change back to daysThreshold * 86400 for production
+        
         const result = await this.database.dbManager.query(`
             SELECT t.symbol, t.exchanges
             FROM tickers t
             WHERE t.active = 1
-                AND (t.updated_at IS NULL OR t.updated_at < datetime('now', '-${daysThreshold} days'))
+                AND (t.updated_at IS NULL OR t.updated_at < datetime('now', '-${secondsThreshold} seconds'))
             ORDER BY t.updated_at ASC
             LIMIT 1000
         `);
@@ -715,11 +744,14 @@ class TickerDataProcessor {
     }
 
     async getTickersNeedingUpdate(hoursThreshold = 24) {
+        // For quick testing, use 60 seconds instead of hours
+        const secondsThreshold = 60; // Change back to hoursThreshold * 3600 for production
+        
         const result = await this.database.dbManager.query(`
             SELECT t.symbol, t.exchanges
             FROM tickers t
             WHERE t.active = 1
-                AND (t.updated_at IS NULL OR t.updated_at < datetime('now', '-${hoursThreshold} hours'))
+                AND (t.updated_at IS NULL OR t.updated_at < datetime('now', '-${secondsThreshold} seconds'))
             ORDER BY t.updated_at ASC
             LIMIT 1000
         `);
@@ -877,15 +909,8 @@ class TickerDataProcessor {
                 return { status: 'inactiveMarked', ticker, reason: tickerData.metadata.errorMessage };
             }
             
-            // Store raw JSON in database
+            // Store ticker data in database
             await this.database.insertOrUpdateTicker(ticker, tickerData);
-            
-            // Store structured data in normalized tables
-            console.log(`📊 Processing structured data for ${ticker}...`);
-            await this.database.dbManager.processTickerData({
-                ticker: ticker,
-                data: tickerData
-            });
             
             // Mark ticker as active with current price
             const currentPrice = tickerData.quote?.regularMarketPrice || 
@@ -1037,17 +1062,112 @@ async function main() {
             
             if (tickersToProcess.length === 0) {
                 console.log('✅ No tickers need data processing at this time!');
+                console.log('');
                 
-                // If no active tickers found, suggest validation options
-                if (!validateFlag && !unvalidatedFlag) {
-                    const unvalidatedTickers = await processor.getUnvalidatedTickers();
-                    const revalidationTickers = await processor.getTickersNeedingValidation(5);
+                // Check if running interactively (from dashboard vs command line)
+                const isInteractive = process.stdin.isTTY;
+                let answer = 'no';
+                
+                if (isInteractive) {
+                    // Running from command line - use readline
+                    const readline = require('readline');
+                    const rl = readline.createInterface({
+                        input: process.stdin,
+                        output: process.stdout
+                    });
                     
-                    if (unvalidatedTickers.length > 0 || revalidationTickers.length > 0) {
-                        console.log(`💡 Tip: Found ${unvalidatedTickers.length} unvalidated tickers and ${revalidationTickers.length} active tickers needing revalidation. Run with --validate to process them.`);
-                    }
+                    console.log('🔄 Would you like to force update all active tickers anyway?');
+                    console.log('   This will refresh data for all tickers regardless of when they were last updated.');
+                    console.log('');
+                    
+                    answer = await new Promise((resolve) => {
+                        rl.question('Enter your choice (yes/no): ', (answer) => {
+                            rl.close();
+                            resolve(answer.toLowerCase().trim());
+                        });
+                    });
+                } else {
+                    // Running from dashboard - prompt through server
+                    console.log('🔄 No tickers need updating at this time.');
+                    console.log('');
+                    console.log('Would you like to force update all active tickers anyway?');
+                    console.log('This will refresh data for all tickers regardless of when they were last updated.');
+                    console.log('');
+                    console.log('This command requires user input');
+                    console.log('💡 Please enter your choice in the input field below:');
+                    console.log('   Type "yes" to force update all active tickers');
+                    console.log('   Type "no" to exit without processing');
+                    console.log('');
+                    
+                    // Wait for input from the server's interactive input system
+                    answer = await new Promise((resolve) => {
+                        let inputReceived = false;
+                        
+                        // Set up stdin listener to receive input from the server
+                        const onData = (data) => {
+                            if (!inputReceived) {
+                                inputReceived = true;
+                                const input = data.toString().trim().toLowerCase();
+                                process.stdin.removeListener('data', onData);
+                                resolve(input);
+                            }
+                        };
+                        
+                        process.stdin.on('data', onData);
+                        
+                        // Timeout after 5 minutes
+                        setTimeout(() => {
+                            if (!inputReceived) {
+                                inputReceived = true;
+                                process.stdin.removeListener('data', onData);
+                                console.log('⏱️  No response received after 5 minutes, exiting...');
+                                resolve('no');
+                            }
+                        }, 300000);
+                    });
                 }
-            } else {
+                
+                console.log('');
+                
+                if (answer === 'yes' || answer === 'y') {
+                    console.log('🚀 Force updating all active tickers...');
+                    tickersToProcess = await processor.getActiveTickers();
+                    
+                    if (tickersToProcess.length === 0) {
+                        console.log('❌ No active tickers found in database.');
+                        console.log('');
+                        
+                        // If no active tickers found, suggest validation options
+                        const unvalidatedTickers = await processor.getUnvalidatedTickers();
+                        const revalidationTickers = await processor.getTickersNeedingValidation(5);
+                        
+                        if (unvalidatedTickers.length > 0 || revalidationTickers.length > 0) {
+                            console.log(`💡 Tip: Found ${unvalidatedTickers.length} unvalidated tickers and ${revalidationTickers.length} active tickers needing revalidation.`);
+                            console.log('   Run with --validate to process them.');
+                        }
+                        await processor.close();
+                        return;
+                    }
+                } else {
+                    console.log('👋 Exiting without processing.');
+                    console.log('');
+                    
+                    // If no active tickers found, suggest validation options
+                    if (!validateFlag && !unvalidatedFlag) {
+                        const unvalidatedTickers = await processor.getUnvalidatedTickers();
+                        const revalidationTickers = await processor.getTickersNeedingValidation(5);
+                        
+                        if (unvalidatedTickers.length > 0 || revalidationTickers.length > 0) {
+                            console.log(`💡 Tip: Found ${unvalidatedTickers.length} unvalidated tickers and ${revalidationTickers.length} active tickers needing revalidation.`);
+                            console.log('   Run with --validate to process them.');
+                        }
+                    }
+                    await processor.close();
+                    return;
+                }
+            }
+            
+            if (tickersToProcess.length > 0) {
                 console.log(`📋 Found ${tickersToProcess.length} tickers needing data processing`);
                 
                 // Process the tickers
