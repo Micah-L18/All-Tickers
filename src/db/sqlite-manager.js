@@ -13,6 +13,15 @@ class SQLiteManager {
         this.retryDelay = config.retryDelay || 1000;
         
         console.log(`📁 SQLite database path: ${this.dbPath}`);
+        console.log(`📂 Current working directory: ${process.cwd()}`);
+        console.log(`📂 Script directory: ${__dirname}`);
+        
+        // Ensure the directory exists
+        const dbDir = path.dirname(this.dbPath);
+        if (!fs.existsSync(dbDir)) {
+            console.log(`📁 Creating database directory: ${dbDir}`);
+            fs.mkdirSync(dbDir, { recursive: true });
+        }
     }
 
     async connect() {
